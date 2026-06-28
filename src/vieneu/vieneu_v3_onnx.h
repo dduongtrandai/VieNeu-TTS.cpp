@@ -140,7 +140,7 @@ private:
                         std::vector<int64_t>& codes,
                         bool& eos,
                         std::string& error);
-    int64_t sample_logits(std::vector<float> logits,
+    int64_t sample_logits(std::vector<float>& logits,
                           float temperature,
                           int top_k,
                           float top_p,
@@ -165,7 +165,9 @@ private:
     std::string voices_json_;
     Config config_;
     Tensor2D text_emb_;
+    Tensor2D text_emb_t_;
     Tensor3D audio_emb_;
+    Tensor3D audio_emb_t_;
     ByteBpeTokenizer tokenizer_;
     std::string model_dir_;
     std::string onnx_dir_;

@@ -54,3 +54,5 @@ RelWithDebInfo/
 # OS-specific files
 .DS_Store
 Thumbs.db
+
+draft/

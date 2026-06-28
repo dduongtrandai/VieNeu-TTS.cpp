@@ -7,6 +7,7 @@ param(
     [float]$Temperature = 0.8,
     [int]$TopK = 25,
     [float]$TopP = 0.95,
+    [int]$MaxChars = 384,
     [int]$Threads = 4,
     [string]$AssetRoot = ".models\vieneu-v3-turbo",
     [switch]$SkipDownload,
@@ -19,7 +20,7 @@ $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $RepoRoot = $PSScriptRoot
-$OrtRoot = Join-Path $RepoRoot "ort_sdk\onnxruntime-win-x64-1.20.1"
+$OrtRoot = Join-Path $RepoRoot "ort_sdk\onnxruntime-win-x64-1.24.4"
 $LlamaDir = Join-Path $RepoRoot "llama.cpp"
 $ModelDir = Join-Path $RepoRoot $AssetRoot
 $OnnxDir = Join-Path $ModelDir "onnx"
@@ -251,10 +252,6 @@ function Ensure-Built {
 }
 
 function Ensure-RuntimeDlls {
-    if ((Test-Path (Join-Path $ExeDir "vieneu-tts.dll")) -and (Test-Path (Join-Path $ExeDir "onnxruntime.dll"))) {
-        return
-    }
-
     New-Item -ItemType Directory -Force -Path $ExeDir | Out-Null
 
     # Copy any built dependency DLLs (like llama, ggml, etc.)
@@ -353,6 +350,7 @@ try {
         "--top-k", $TopK.ToString($inv),
         "--top-p", $TopP.ToString($inv),
         "--max-new-frames", $MaxNewFrames.ToString($inv),
+        "--max-chars", $MaxChars.ToString($inv),
         "--threads", $Threads.ToString($inv)
     )
     if ($Voice.Trim().Length -gt 0) {

@@ -205,7 +205,7 @@ $ManifestContent = @{
         backend = "vieneu-tts"
         components = @{
             "llama.cpp" = "b4600" # fallback/placeholder commit
-            "onnxruntime" = "1.20.1"
+            "onnxruntime" = "1.24.4"
         }
         profiles = @("vieneu-v2-turbo", "vieneu-v3-onnx")
     }

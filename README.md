@@ -50,7 +50,7 @@ To build the project locally, open a PowerShell console and run:
 ```
 
 **Parameters supported by `build-local.ps1`:**
-- `-OnnxRuntimeVersion <string>`: Specify ONNX Runtime SDK version to download (default: `1.20.1`).
+- `-OnnxRuntimeVersion <string>`: Specify ONNX Runtime SDK version to download (default: `1.24.4`).
 - `-Clean`: Clean the `build` directory before configuring CMake.
 - `-NoPackage`: Build the project but do not create the final zip package.
 - `-LlamaCppRepo <string>`: Custom Git repository URL for `llama.cpp`.
@@ -176,4 +176,3 @@ int main(void) {
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-

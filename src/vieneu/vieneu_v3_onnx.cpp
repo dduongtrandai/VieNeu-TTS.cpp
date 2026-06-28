@@ -339,6 +339,58 @@ TensorBlob copy_float_tensor(const Ort::Value& value) {
     return blob;
 }
 
+void copy_float_tensor_into(const Ort::Value& value, TensorBlob& blob) {
+    blob.shape = tensor_shape(value);
+    size_t count = 1;
+    for (int64_t dim : blob.shape) {
+        count *= static_cast<size_t>(dim);
+    }
+    blob.data.resize(count);
+    const float* src = value.GetTensorData<float>();
+    std::copy(src, src + count, blob.data.begin());
+}
+
+std::vector<float> transpose_2d(const std::vector<float>& src, int64_t rows, int64_t cols) {
+    std::vector<float> dst(static_cast<size_t>(rows * cols));
+    for (int64_t r = 0; r < rows; ++r) {
+        const float* row = src.data() + r * cols;
+        for (int64_t c = 0; c < cols; ++c) {
+            dst[static_cast<size_t>(c * rows + r)] = row[c];
+        }
+    }
+    return dst;
+}
+
+std::vector<float> transpose_audio_emb(const std::vector<float>& src, int64_t channels, int64_t vocab, int64_t hidden) {
+    std::vector<float> dst(static_cast<size_t>(channels * hidden * vocab));
+    for (int64_t ch = 0; ch < channels; ++ch) {
+        for (int64_t v = 0; v < vocab; ++v) {
+            const float* emb = src.data() + (ch * vocab + v) * hidden;
+            for (int64_t h = 0; h < hidden; ++h) {
+                dst[static_cast<size_t>((ch * hidden + h) * vocab + v)] = emb[h];
+            }
+        }
+    }
+    return dst;
+}
+
+void matvec_transposed(const float* vec, const float* matrix_hv, int64_t hidden, int64_t vocab, std::vector<float>& logits) {
+    logits.assign(static_cast<size_t>(vocab), 0.0f);
+    float* out = logits.data();
+    for (int64_t h = 0; h < hidden; ++h) {
+        const float scale = vec[h];
+        const float* row = matrix_hv + h * vocab;
+#if defined(_MSC_VER)
+#pragma loop(ivdep)
+#elif defined(__GNUC__) || defined(__clang__)
+#pragma GCC ivdep
+#endif
+        for (int64_t v = 0; v < vocab; ++v) {
+            out[v] += scale * row[v];
+        }
+    }
+}
+
 std::vector<float> softmax(const std::vector<float>& logits) {
     float max_v = -std::numeric_limits<float>::infinity();
     for (float v : logits) {
@@ -393,6 +445,152 @@ std::vector<const char*> name_ptrs(const std::vector<std::string>& names) {
         ptrs.push_back(name.c_str());
     }
     return ptrs;
+}
+
+bool is_space_char(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+std::string trim_copy(const std::string& value) {
+    size_t begin = 0;
+    while (begin < value.size() && is_space_char(value[begin])) {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin && is_space_char(value[end - 1])) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+size_t utf8_codepoint_count(const std::string& value) {
+    size_t count = 0;
+    for (unsigned char c : value) {
+        if ((c & 0xC0u) != 0x80u) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool can_append_chunk(const std::string& current, const std::string& item, size_t max_chars) {
+    if (current.empty()) {
+        return utf8_codepoint_count(item) <= max_chars;
+    }
+    return utf8_codepoint_count(current) + 1 + utf8_codepoint_count(item) <= max_chars;
+}
+
+void append_joined(std::string& current, const std::string& item) {
+    if (current.empty()) {
+        current = item;
+    } else {
+        current += ' ';
+        current += item;
+    }
+}
+
+std::vector<std::string> split_words(const std::string& text) {
+    std::vector<std::string> words;
+    std::string cur;
+    for (char c : text) {
+        if (is_space_char(c)) {
+            if (!cur.empty()) {
+                words.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) {
+        words.push_back(cur);
+    }
+    return words;
+}
+
+std::vector<std::string> split_long_text_part(const std::string& text, size_t max_chars) {
+    std::vector<std::string> chunks;
+    std::string current;
+    for (const std::string& word : split_words(text)) {
+        if (can_append_chunk(current, word, max_chars)) {
+            append_joined(current, word);
+        } else {
+            if (!current.empty()) {
+                chunks.push_back(current);
+            }
+            current = word;
+        }
+    }
+    if (!current.empty()) {
+        chunks.push_back(current);
+    }
+    return chunks;
+}
+
+std::vector<std::string> split_text_for_v3_chunks(const std::string& text, int max_chars_value) {
+    const size_t max_chars = static_cast<size_t>((std::max)(16, max_chars_value));
+    std::vector<std::string> chunks;
+    std::string current;
+    std::string sentence;
+
+    auto flush_current = [&]() {
+        std::string item = trim_copy(current);
+        if (!item.empty()) {
+            chunks.push_back(item);
+        }
+        current.clear();
+    };
+
+    auto add_part = [&](const std::string& raw) {
+        const std::string part = trim_copy(raw);
+        if (part.empty()) {
+            return;
+        }
+        if (utf8_codepoint_count(part) > max_chars) {
+            flush_current();
+            std::string sub;
+            for (char c : part) {
+                sub.push_back(c);
+                if (c == ',' || c == ';' || c == ':') {
+                    const std::string minor = trim_copy(sub);
+                    if (!minor.empty()) {
+                        if (utf8_codepoint_count(minor) > max_chars) {
+                            const auto word_chunks = split_long_text_part(minor, max_chars);
+                            chunks.insert(chunks.end(), word_chunks.begin(), word_chunks.end());
+                        } else {
+                            chunks.push_back(minor);
+                        }
+                    }
+                    sub.clear();
+                }
+            }
+            const std::string tail = trim_copy(sub);
+            if (!tail.empty()) {
+                if (utf8_codepoint_count(tail) > max_chars) {
+                    const auto word_chunks = split_long_text_part(tail, max_chars);
+                    chunks.insert(chunks.end(), word_chunks.begin(), word_chunks.end());
+                } else {
+                    chunks.push_back(tail);
+                }
+            }
+            return;
+        }
+        if (!can_append_chunk(current, part, max_chars)) {
+            flush_current();
+        }
+        append_joined(current, part);
+    };
+
+    for (char c : text) {
+        sentence.push_back(c);
+        if (c == '.' || c == '!' || c == '?' || c == '\n' || c == '\r') {
+            add_part(sentence);
+            sentence.clear();
+        }
+    }
+    add_part(sentence);
+    flush_current();
+    return chunks;
 }
 
 } // namespace
@@ -542,10 +740,17 @@ bool VieneuV3OnnxEngine::load_heads_npz(const std::string& path, std::string& er
         text_emb_.rows = text.shape[0];
         text_emb_.cols = text.shape[1];
         text_emb_.data = text.data;
+        text_emb_t_.rows = text_emb_.cols;
+        text_emb_t_.cols = text_emb_.rows;
+        text_emb_t_.data = transpose_2d(text_emb_.data, text_emb_.rows, text_emb_.cols);
         audio_emb_.dim0 = audio.shape[0];
         audio_emb_.dim1 = audio.shape[1];
         audio_emb_.dim2 = audio.shape[2];
         audio_emb_.data = audio.data;
+        audio_emb_t_.dim0 = audio_emb_.dim0;
+        audio_emb_t_.dim1 = audio_emb_.dim2;
+        audio_emb_t_.dim2 = audio_emb_.dim1;
+        audio_emb_t_.data = transpose_audio_emb(audio_emb_.data, audio_emb_.dim0, audio_emb_.dim1, audio_emb_.dim2);
         if (text_emb_.cols != config_.hidden_size || audio_emb_.dim2 != config_.hidden_size) {
             error = "Embedding hidden size does not match config.json";
             return false;
@@ -1023,7 +1228,7 @@ std::vector<float> VieneuV3OnnxEngine::embed_rows(const PromptRows& rows) const 
 }
 
 int64_t VieneuV3OnnxEngine::sample_logits(
-    std::vector<float> logits,
+    std::vector<float>& logits,
     float temperature,
     int top_k,
     float top_p,
@@ -1122,14 +1327,10 @@ bool VieneuV3OnnxEngine::acoustic_frame(
         TensorBlob pv1 = copy_float_tensor(out[4]);
         std::vector<float> slot0(hidden.data.begin(), hidden.data.begin() + H);
 
+        std::vector<float> logits;
         auto sample_channel = [&](int ch, const float* vec) {
-            std::vector<float> logits(static_cast<size_t>(audio_emb_.dim1), 0.0f);
-            for (int64_t v = 0; v < audio_emb_.dim1; ++v) {
-                const float* emb = audio_emb_.data.data() + (static_cast<int64_t>(ch) * audio_emb_.dim1 + v) * audio_emb_.dim2;
-                float sum = 0.0f;
-                for (int i = 0; i < H; ++i) sum += vec[i] * emb[i];
-                logits[static_cast<size_t>(v)] = sum;
-            }
+            const float* head = audio_emb_t_.data.data() + static_cast<int64_t>(ch) * audio_emb_t_.dim1 * audio_emb_t_.dim2;
+            matvec_transposed(vec, head, audio_emb_t_.dim1, audio_emb_t_.dim2, logits);
             std::unordered_set<int>* prev = history.empty() ? nullptr : &history[static_cast<size_t>(ch)];
             int64_t code = sample_logits(logits, temperature, top_k, top_p, repetition_penalty, prev);
             if (prev) prev->insert(static_cast<int>(code));
@@ -1160,21 +1361,16 @@ bool VieneuV3OnnxEngine::acoustic_frame(
                 step_inputs.size(),
                 acoustic_io_.output_ptrs.data(),
                 acoustic_io_.output_ptrs.size());
-            hidden = copy_float_tensor(step_out[0]);
-            pk0 = copy_float_tensor(step_out[1]);
-            pk1 = copy_float_tensor(step_out[2]);
-            pv0 = copy_float_tensor(step_out[3]);
-            pv1 = copy_float_tensor(step_out[4]);
+            copy_float_tensor_into(step_out[0], hidden);
+            copy_float_tensor_into(step_out[1], pk0);
+            copy_float_tensor_into(step_out[2], pk1);
+            copy_float_tensor_into(step_out[3], pv0);
+            copy_float_tensor_into(step_out[4], pv1);
             codes.push_back(sample_channel(ch, hidden.data.data()));
         }
 
-        std::vector<float> text_logits(static_cast<size_t>(text_emb_.rows), 0.0f);
-        for (int64_t v = 0; v < text_emb_.rows; ++v) {
-            const float* emb = text_emb_.data.data() + v * text_emb_.cols;
-            float sum = 0.0f;
-            for (int i = 0; i < H; ++i) sum += slot0[static_cast<size_t>(i)] * emb[i];
-            text_logits[static_cast<size_t>(v)] = sum;
-        }
+        std::vector<float> text_logits;
+        matvec_transposed(slot0.data(), text_emb_t_.data.data(), text_emb_t_.rows, text_emb_t_.cols, text_logits);
         eos = static_cast<int>(std::distance(text_logits.begin(), std::max_element(text_logits.begin(), text_logits.end()))) ==
               config_.speech_generation_end_token_id;
         return true;
@@ -1317,10 +1513,10 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
                 inputs.size(),
                 decode_io_.output_ptrs.data(),
                 decode_io_.output_ptrs.size());
-            TensorBlob dec_hidden = copy_float_tensor(dec[0]);
-            std::copy(dec_hidden.data.begin(), dec_hidden.data.begin() + config_.hidden_size, h.begin());
-            for (int i = 0; i < config_.num_hidden_layers; ++i) past_k[static_cast<size_t>(i)] = copy_float_tensor(dec[1 + i]);
-            for (int i = 0; i < config_.num_hidden_layers; ++i) past_v[static_cast<size_t>(i)] = copy_float_tensor(dec[1 + config_.num_hidden_layers + i]);
+            const float* dec_hidden = dec[0].GetTensorData<float>();
+            std::copy(dec_hidden, dec_hidden + config_.hidden_size, h.begin());
+            for (int i = 0; i < config_.num_hidden_layers; ++i) copy_float_tensor_into(dec[1 + i], past_k[static_cast<size_t>(i)]);
+            for (int i = 0; i < config_.num_hidden_layers; ++i) copy_float_tensor_into(dec[1 + config_.num_hidden_layers + i], past_v[static_cast<size_t>(i)]);
         }
 
         if (frames.empty()) {
@@ -1369,12 +1565,39 @@ bool VieneuV3OnnxEngine::synthesize(const VieneuV3OnnxParams& params, std::vecto
         return false;
     }
 
-    const std::string phonemes = phonemize_for_v3(params.text);
-    return synthesize_phonemes(
-        phonemes,
-        ref_codes.empty() ? nullptr : &ref_codes,
-        leading_token,
-        params,
-        out_audio,
-        error);
+    const std::vector<std::string> chunks = split_text_for_v3_chunks(params.text, params.max_chars);
+    if (chunks.empty()) {
+        error = "VieNeu v3 synthesis produced no text chunks.";
+        return false;
+    }
+
+    const int silence_samples = static_cast<int>(std::lround(static_cast<double>(sample_rate()) * 0.15));
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        const std::string phonemes = phonemize_for_v3(chunks[i]);
+        std::vector<float> chunk_audio;
+        if (!synthesize_phonemes(
+                phonemes,
+                ref_codes.empty() ? nullptr : &ref_codes,
+                leading_token,
+                params,
+                chunk_audio,
+                error)) {
+            if (chunks.size() > 1) {
+                error += " (chunk " + std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + ")";
+            }
+            return false;
+        }
+        if (chunk_audio.empty()) {
+            continue;
+        }
+        if (!out_audio.empty() && silence_samples > 0) {
+            out_audio.insert(out_audio.end(), static_cast<size_t>(silence_samples), 0.0f);
+        }
+        out_audio.insert(out_audio.end(), chunk_audio.begin(), chunk_audio.end());
+    }
+    if (out_audio.empty()) {
+        error = "VieNeu v3 synthesis produced empty audio.";
+        return false;
+    }
+    return true;
 }

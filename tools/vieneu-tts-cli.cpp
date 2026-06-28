@@ -39,6 +39,7 @@ static void print_usage(const std::string& argv0) {
               << "  --top-k VALUE          Top-k sampling value\n"
               << "  --top-p VALUE          VieNeu v3 top-p sampling value\n"
               << "  --max-new-frames N     VieNeu v3 frame limit\n"
+              << "  --max-chars N          VieNeu v3 text chunk limit (default: runtime default)\n"
               << "  --threads N            ONNX/CPU thread count (0 = ONNX Runtime auto; omitted = runtime default)\n"
               << "  -h, --help             Show this help message\n";
 }
@@ -142,6 +143,7 @@ int main(int argc, char* argv[]) {
     int top_k = 0;
     float top_p = 0.0f;
     int max_new_frames = 0;
+    int max_chars = 0;
     int n_threads = -1;
 
     for (size_t i = 1; i < args.size(); ++i) {
@@ -182,6 +184,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < args.size()) top_p = std::stof(args[++i]);
         } else if (arg == "--max-new-frames") {
             if (i + 1 < args.size()) max_new_frames = std::stoi(args[++i]);
+        } else if (arg == "--max-chars") {
+            if (i + 1 < args.size()) max_chars = std::stoi(args[++i]);
         } else if (arg == "--threads") {
             if (i + 1 < args.size()) n_threads = std::stoi(args[++i]);
         } else if (arg == "-h" || arg == "--help") {
@@ -239,6 +243,7 @@ int main(int argc, char* argv[]) {
         if (top_k > 0) tts_params.top_k = top_k;
         if (top_p > 0.0f) tts_params.top_p = top_p;
         if (max_new_frames > 0) tts_params.max_new_frames = max_new_frames;
+        if (max_chars > 0) tts_params.max_chars = max_chars;
 
         vieneu_audio audio;
         memset(&audio, 0, sizeof(audio));

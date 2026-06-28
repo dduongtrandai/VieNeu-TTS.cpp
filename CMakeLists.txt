@@ -43,10 +43,11 @@ set(LLAMA_USE_PREBUILT_UI OFF CACHE BOOL "Do not fetch llama.cpp prebuilt UI" FO
 add_subdirectory(${VIENEU_LLAMA_DIR} llama_cpp_build EXCLUDE_FROM_ALL)
 
 # Find ONNX Runtime dependency
+unset(ONNXRUNTIME_LIB CACHE)
 if(ONNXRUNTIME_ROOT)
     include_directories(SYSTEM "${ONNXRUNTIME_ROOT}/include")
     link_directories("${ONNXRUNTIME_ROOT}/lib")
-    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" REQUIRED)
+    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
     message(STATUS "ONNX Runtime library found at: ${ONNXRUNTIME_LIB}")
 else()
     find_library(ONNXRUNTIME_LIB NAMES onnxruntime REQUIRED)
