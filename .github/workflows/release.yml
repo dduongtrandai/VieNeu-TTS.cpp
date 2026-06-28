@@ -1,0 +1,115 @@
+name: Release SpeechLM TTS CPU Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Package CPU Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          path: llama.cpp
+          fetch-depth: 1
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Verify build tools
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          where.exe cl
+          where.exe cmake
+          where.exe ninja
+          cmake --version
+          ninja --version
+
+      - name: Install ONNX Runtime SDK (v1.20.1)
+        shell: pwsh
+        run: |
+          $OrtVersion = "1.20.1"
+          $Url = "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVersion/onnxruntime-win-x64-$OrtVersion.zip"
+          $ZipFile = "onnxruntime-win-x64-$OrtVersion.zip"
+          Write-Host "Downloading ONNX Runtime SDK from $Url..."
+          Invoke-WebRequest -Uri $Url -OutFile $ZipFile
+          Write-Host "Extracting ONNX Runtime SDK..."
+          Expand-Archive -Path $ZipFile -DestinationPath "ort_sdk"
+          $OrtRoot = Resolve-Path "ort_sdk/onnxruntime-win-x64-$OrtVersion"
+          echo "ONNXRUNTIME_ROOT=$OrtRoot" >> $env:GITHUB_ENV
+          Write-Host "ONNX Runtime SDK successfully installed at $OrtRoot"
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          if (Test-Path "build") {
+            Remove-Item -Recurse -Force "build"
+          }
+
+          # Fallback for older workflow runs / forks that do not have the dedicated checkout step.
+          if (-not (Test-Path "llama.cpp/CMakeLists.txt") -and -not (Test-Path "llama/CMakeLists.txt")) {
+            Write-Host "llama.cpp source not found. Cloning ggml-org/llama.cpp as fallback..."
+            git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+          }
+
+          $llamaDir = ""
+          if (Test-Path "llama.cpp/CMakeLists.txt") {
+            $llamaDir = "llama.cpp"
+          } elseif (Test-Path "llama/CMakeLists.txt") {
+            $llamaDir = "llama"
+          } else {
+            Write-Error "Could not find llama.cpp source directory (expected llama.cpp/ or llama/)."
+          }
+
+          $cmakeArgs = @(
+            "-B", "build",
+            "-S", ".",
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DSLM_LLAMA_DIR=$llamaDir",
+            "-DONNXRUNTIME_ROOT=${{ env.ONNXRUNTIME_ROOT }}"
+          )
+
+          cmake @cmakeArgs
+
+      - name: Build Project
+        shell: pwsh
+        run: |
+          cmake --build build --parallel
+
+      - name: Package Runtime Release
+        shell: pwsh
+        run: |
+          pwsh -File scripts/package-runtime.ps1 `
+            -BuildDir "build" `
+            -OutputDir "dist" `
+            -OnnxRuntimeRoot "${{ env.ONNXRUNTIME_ROOT }}" `
+            -RuntimeVersion "${{ github.ref_name }}"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/speech-lm-tts-win-cpu.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

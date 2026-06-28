@@ -1,0 +1,56 @@
+# CMake and builds
+build/
+build*/
+out/
+dist/
+stage/
+outputs/
+
+# Dependencies
+.models/
+ort_sdk/
+llama.cpp/
+onnxruntime-win-*.zip
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+*.db
+*.opendb
+*.vc.db
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.dir/
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# CMake temporary / generated files (fallback)
+CMakeCache.txt
+CMakeFiles/
+CMakePackager.cmake
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CMakeUserPresets.json
+
+# Local Windows build directories / MSBuild default dirs
+x64/
+x86/
+ARM/
+ARM64/
+Debug/
+Release/
+MinSizeRel/
+RelWithDebInfo/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
