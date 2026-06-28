@@ -111,14 +111,15 @@ function Find-CMake {
 }
 
 function Ensure-File([string]$Url, [string]$Destination) {
-    if ($SkipDownload) {
-        if (Test-Path $Destination) {
-            if (!(Test-AssetIntegrity $Destination)) {
-                throw "Existing file failed integrity check and -SkipDownload was set: $Destination"
-            }
+    if (Test-Path $Destination) {
+        $localSize = (Get-Item -LiteralPath $Destination).Length
+        if ($localSize -gt 0) {
             Write-Host "Found: $Destination"
             return
         }
+    }
+
+    if ($SkipDownload) {
         throw "Missing required file and -SkipDownload was set: $Destination"
     }
 
@@ -133,8 +134,8 @@ function Ensure-File([string]$Url, [string]$Destination) {
                 Write-Host "Local file has expected size but failed integrity check, redownloading: $Destination"
                 Remove-Item -LiteralPath $Destination -Force
             } else {
-            Write-Host "Found: $Destination ($localSize bytes)"
-            return
+                Write-Host "Found: $Destination ($localSize bytes)"
+                return
             }
         }
         if ((Test-Path $Destination) -and $remoteSize -gt 0 -and $localSize -gt $remoteSize) {
@@ -219,11 +220,7 @@ function Download-File([string]$Url, [string]$Destination) {
 }
 
 function Ensure-Built {
-    if ((Test-Path $CliExe) -and $NoBuild) {
-        return
-    }
-    if ((Test-Path $CliExe) -and (Test-Path (Join-Path $ExeDir "vieneu-tts.dll"))) {
-        Write-Host "Found existing CLI: $CliExe"
+    if (Test-Path $CliExe) {
         return
     }
     if ($NoBuild) {
@@ -254,6 +251,10 @@ function Ensure-Built {
 }
 
 function Ensure-RuntimeDlls {
+    if ((Test-Path (Join-Path $ExeDir "vieneu-tts.dll")) -and (Test-Path (Join-Path $ExeDir "onnxruntime.dll"))) {
+        return
+    }
+
     New-Item -ItemType Directory -Force -Path $ExeDir | Out-Null
 
     # Copy any built dependency DLLs (like llama, ggml, etc.)
