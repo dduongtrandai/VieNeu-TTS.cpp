@@ -174,4 +174,6 @@ int main(void) {
 ---
 
 ## License
-Refer to the parent project license or context-specific license agreements for distribution rights.
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
