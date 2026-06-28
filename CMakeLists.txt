@@ -53,12 +53,23 @@ else()
     find_library(ONNXRUNTIME_LIB NAMES onnxruntime REQUIRED)
 endif()
 
+set(VIENEU_V3_ONNX_SOURCES
+    src/vieneu/v3_onnx/vieneu_v3_onnx_engine.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_assets.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_tokenizer.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_audio.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_inference.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_sampling.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_voice.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_utils.cpp
+)
+
 # Core static library
 add_library(vieneu-tts-core STATIC
     src/backends/llama_backend.cpp
     src/codecs/neucodec_onnx.cpp
     src/vieneu/vieneu.cpp
-    src/vieneu/vieneu_v3_onnx.cpp
+    ${VIENEU_V3_ONNX_SOURCES}
 )
 
 target_include_directories(vieneu-tts-core PUBLIC

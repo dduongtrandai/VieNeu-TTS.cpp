@@ -163,6 +163,8 @@ private:
     SessionIo codec_encode_io_;
     std::string codec_encode_path_;
     std::string voices_json_;
+    std::string default_voice_id_;
+    std::unordered_map<std::string, VoicePreset> voice_presets_;
     Config config_;
     Tensor2D text_emb_;
     Tensor2D text_emb_t_;
