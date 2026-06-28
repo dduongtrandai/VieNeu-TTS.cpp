@@ -7,6 +7,8 @@ param(
     [float]$Temperature = 0.8,
     [int]$TopK = 25,
     [float]$TopP = 0.95,
+    [int]$MaxChars = 384,
+    [int]$Threads = 4,
     [string]$AssetRoot = ".models\vieneu-v3-turbo",
     [switch]$SkipDownload,
     [switch]$NoBuild
@@ -18,15 +20,43 @@ $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $RepoRoot = $PSScriptRoot
-$BuildDir = Join-Path $RepoRoot "build-check"
-$ExeDir = Join-Path $BuildDir "Release"
-$CliExe = Join-Path $ExeDir "vieneu-tts-cli.exe"
-$OrtRoot = Join-Path $RepoRoot "ort_sdk\onnxruntime-win-x64-1.20.1"
+$OrtRoot = Join-Path $RepoRoot "ort_sdk\onnxruntime-win-x64-1.24.4"
 $LlamaDir = Join-Path $RepoRoot "llama.cpp"
 $ModelDir = Join-Path $RepoRoot $AssetRoot
 $OnnxDir = Join-Path $ModelDir "onnx"
 $CodecDir = Join-Path $ModelDir "codec"
 $VoicesJson = Join-Path $ModelDir "voices_v3_turbo.json"
+
+# Find existing built CLI if available in common build directories
+$CliCandidates = @(
+    (Join-Path $RepoRoot "build\vieneu-tts-cli.exe"),
+    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe"),
+    (Join-Path $RepoRoot "build-check\Release\vieneu-tts-cli.exe"),
+    (Join-Path $RepoRoot "build-check\vieneu-tts-cli.exe")
+)
+
+$CliExe = $null
+foreach ($path in $CliCandidates) {
+    if (Test-Path $path) {
+        $CliExe = $path
+        break
+    }
+}
+
+if ($CliExe) {
+    $ExeDir = Split-Path -Parent $CliExe
+    $parentName = Split-Path $ExeDir -Leaf
+    if ($parentName -in @("Release", "Debug", "RelWithDebInfo")) {
+        $BuildDir = Split-Path $ExeDir -Parent
+    } else {
+        $BuildDir = $ExeDir
+    }
+} else {
+    # Default fallback if not built yet
+    $BuildDir = Join-Path $RepoRoot "build-check"
+    $ExeDir = Join-Path $BuildDir "Release"
+    $CliExe = Join-Path $ExeDir "vieneu-tts-cli.exe"
+}
 
 function Write-Step([string]$Message) {
     Write-Host ""
@@ -82,14 +112,15 @@ function Find-CMake {
 }
 
 function Ensure-File([string]$Url, [string]$Destination) {
-    if ($SkipDownload) {
-        if (Test-Path $Destination) {
-            if (!(Test-AssetIntegrity $Destination)) {
-                throw "Existing file failed integrity check and -SkipDownload was set: $Destination"
-            }
+    if (Test-Path $Destination) {
+        $localSize = (Get-Item -LiteralPath $Destination).Length
+        if ($localSize -gt 0) {
             Write-Host "Found: $Destination"
             return
         }
+    }
+
+    if ($SkipDownload) {
         throw "Missing required file and -SkipDownload was set: $Destination"
     }
 
@@ -104,8 +135,8 @@ function Ensure-File([string]$Url, [string]$Destination) {
                 Write-Host "Local file has expected size but failed integrity check, redownloading: $Destination"
                 Remove-Item -LiteralPath $Destination -Force
             } else {
-            Write-Host "Found: $Destination ($localSize bytes)"
-            return
+                Write-Host "Found: $Destination ($localSize bytes)"
+                return
             }
         }
         if ((Test-Path $Destination) -and $remoteSize -gt 0 -and $localSize -gt $remoteSize) {
@@ -190,11 +221,7 @@ function Download-File([string]$Url, [string]$Destination) {
 }
 
 function Ensure-Built {
-    if ((Test-Path $CliExe) -and $NoBuild) {
-        return
-    }
-    if ((Test-Path $CliExe) -and (Test-Path (Join-Path $ExeDir "vieneu-tts.dll"))) {
-        Write-Host "Found existing CLI: $CliExe"
+    if (Test-Path $CliExe) {
         return
     }
     if ($NoBuild) {
@@ -227,18 +254,38 @@ function Ensure-Built {
 function Ensure-RuntimeDlls {
     New-Item -ItemType Directory -Force -Path $ExeDir | Out-Null
 
-    $binDir = Join-Path $BuildDir "bin\Release"
-    if (Test-Path $binDir) {
-        Get-ChildItem $binDir -Filter "*.dll" | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $ExeDir -Force
+    # Copy any built dependency DLLs (like llama, ggml, etc.)
+    $binDirCandidates = @(
+        (Join-Path $BuildDir "bin\Release"),
+        (Join-Path $BuildDir "bin")
+    )
+    foreach ($binDir in $binDirCandidates) {
+        if (Test-Path $binDir) {
+            Get-ChildItem $binDir -Filter "*.dll" | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $ExeDir -Force
+            }
         }
     }
 
-    $ortLib = Join-Path $OrtRoot "lib"
-    foreach ($name in @("onnxruntime.dll", "onnxruntime_providers_shared.dll")) {
-        $src = Join-Path $ortLib $name
-        if (Test-Path $src) {
-            Copy-Item -LiteralPath $src -Destination $ExeDir -Force
+    # Copy vieneu-tts.dll if it exists in BuildDir but not in ExeDir
+    $dllSrc = Join-Path $BuildDir "vieneu-tts.dll"
+    if ((Test-Path $dllSrc) -and ($BuildDir -ne $ExeDir)) {
+        Copy-Item -LiteralPath $dllSrc -Destination $ExeDir -Force
+    }
+
+    # Copy ONNX Runtime DLLs
+    $ortLibCandidates = @(
+        (Join-Path $OrtRoot "lib"),
+        (Join-Path $OrtRoot "bin")
+    )
+    foreach ($ortLib in $ortLibCandidates) {
+        if (Test-Path $ortLib) {
+            foreach ($name in @("onnxruntime.dll", "onnxruntime_providers_shared.dll")) {
+                $src = Join-Path $ortLib $name
+                if (Test-Path $src) {
+                    Copy-Item -LiteralPath $src -Destination $ExeDir -Force
+                }
+            }
         }
     }
 }
@@ -302,7 +349,9 @@ try {
         "--temperature", $Temperature.ToString($inv),
         "--top-k", $TopK.ToString($inv),
         "--top-p", $TopP.ToString($inv),
-        "--max-new-frames", $MaxNewFrames.ToString($inv)
+        "--max-new-frames", $MaxNewFrames.ToString($inv),
+        "--max-chars", $MaxChars.ToString($inv),
+        "--threads", $Threads.ToString($inv)
     )
     if ($Voice.Trim().Length -gt 0) {
         $argsList += @("--voice", $Voice)
@@ -314,12 +363,18 @@ try {
 
     Write-Step "Running TTS"
     Write-Host "& $CliExe $($argsList -join ' ')"
+    
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     & $CliExe @argsList
+    $stopwatch.Stop()
+
     if ($LASTEXITCODE -ne 0) {
         throw "TTS command failed with exit code $LASTEXITCODE."
     }
 
+    $elapsedSec = $stopwatch.Elapsed.TotalSeconds
     Write-Step "Done"
+    Write-Host "Total CLI execution time: $($elapsedSec.ToString("F3"))s" -ForegroundColor Cyan
     Write-Host "Output WAV: $OutputPath" -ForegroundColor Green
 } finally {
     Pop-Location

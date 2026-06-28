@@ -43,21 +43,33 @@ set(LLAMA_USE_PREBUILT_UI OFF CACHE BOOL "Do not fetch llama.cpp prebuilt UI" FO
 add_subdirectory(${VIENEU_LLAMA_DIR} llama_cpp_build EXCLUDE_FROM_ALL)
 
 # Find ONNX Runtime dependency
+unset(ONNXRUNTIME_LIB CACHE)
 if(ONNXRUNTIME_ROOT)
     include_directories(SYSTEM "${ONNXRUNTIME_ROOT}/include")
     link_directories("${ONNXRUNTIME_ROOT}/lib")
-    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" REQUIRED)
+    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
     message(STATUS "ONNX Runtime library found at: ${ONNXRUNTIME_LIB}")
 else()
     find_library(ONNXRUNTIME_LIB NAMES onnxruntime REQUIRED)
 endif()
+
+set(VIENEU_V3_ONNX_SOURCES
+    src/vieneu/v3_onnx/vieneu_v3_onnx_engine.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_assets.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_tokenizer.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_audio.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_inference.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_sampling.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_voice.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_utils.cpp
+)
 
 # Core static library
 add_library(vieneu-tts-core STATIC
     src/backends/llama_backend.cpp
     src/codecs/neucodec_onnx.cpp
     src/vieneu/vieneu.cpp
-    src/vieneu/vieneu_v3_onnx.cpp
+    ${VIENEU_V3_ONNX_SOURCES}
 )
 
 target_include_directories(vieneu-tts-core PUBLIC

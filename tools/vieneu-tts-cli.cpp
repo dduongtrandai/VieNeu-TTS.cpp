@@ -5,6 +5,7 @@
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -38,6 +39,8 @@ static void print_usage(const std::string& argv0) {
               << "  --top-k VALUE          Top-k sampling value\n"
               << "  --top-p VALUE          VieNeu v3 top-p sampling value\n"
               << "  --max-new-frames N     VieNeu v3 frame limit\n"
+              << "  --max-chars N          VieNeu v3 text chunk limit (default: runtime default)\n"
+              << "  --threads N            ONNX/CPU thread count (0 = ONNX Runtime auto; omitted = runtime default)\n"
               << "  -h, --help             Show this help message\n";
 }
 
@@ -140,6 +143,8 @@ int main(int argc, char* argv[]) {
     int top_k = 0;
     float top_p = 0.0f;
     int max_new_frames = 0;
+    int max_chars = 0;
+    int n_threads = -1;
 
     for (size_t i = 1; i < args.size(); ++i) {
         std::string arg = args[i];
@@ -179,6 +184,10 @@ int main(int argc, char* argv[]) {
             if (i + 1 < args.size()) top_p = std::stof(args[++i]);
         } else if (arg == "--max-new-frames") {
             if (i + 1 < args.size()) max_new_frames = std::stoi(args[++i]);
+        } else if (arg == "--max-chars") {
+            if (i + 1 < args.size()) max_chars = std::stoi(args[++i]);
+        } else if (arg == "--threads") {
+            if (i + 1 < args.size()) n_threads = std::stoi(args[++i]);
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv0);
             return 0;
@@ -215,6 +224,9 @@ int main(int argc, char* argv[]) {
         params.config_path = config_path.empty() ? nullptr : config_path.c_str();
         params.tokenizer_path = tokenizer_path.empty() ? nullptr : tokenizer_path.c_str();
         params.voices_json_path = voices_json_path.empty() ? nullptr : voices_json_path.c_str();
+        if (n_threads >= 0) {
+            params.n_threads = n_threads;
+        }
 
         vieneu_context* ctx = vieneu_init_v2(&params);
         if (!ctx) {
@@ -231,18 +243,31 @@ int main(int argc, char* argv[]) {
         if (top_k > 0) tts_params.top_k = top_k;
         if (top_p > 0.0f) tts_params.top_p = top_p;
         if (max_new_frames > 0) tts_params.max_new_frames = max_new_frames;
+        if (max_chars > 0) tts_params.max_chars = max_chars;
 
         vieneu_audio audio;
         memset(&audio, 0, sizeof(audio));
         std::cout << "[CLI] Synthesizing with VieNeu v3: \"" << text << "\"\n";
-        if (vieneu_synthesize_v2(ctx, &tts_params, &audio) != 0) {
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        int synth_status = vieneu_synthesize_v2(ctx, &tts_params, &audio);
+        auto end_time = std::chrono::high_resolution_clock::now();
+        
+        if (synth_status != 0) {
             std::cerr << "[CLI] Synthesis failed: " << vieneu_last_error() << "\n";
             vieneu_free(ctx);
             return 1;
         }
 
+        double elapsed_sec = std::chrono::duration<double>(end_time - start_time).count();
+        double audio_dur_sec = (double)audio.n_samples / audio.sample_rate;
+        double rtf = elapsed_sec / audio_dur_sec;
+
         std::cout << "[CLI] Synthesis successful. n_samples=" << audio.n_samples
                   << ", sample_rate=" << audio.sample_rate << "Hz\n";
+        std::cout << "[CLI] Inference time (model execution): " << elapsed_sec << "s (" << (elapsed_sec * 1000.0) << " ms)\n";
+        std::cout << "[CLI] Audio duration: " << audio_dur_sec << "s\n";
+        std::cout << "[CLI] Real-Time Factor (RTF): " << rtf << " (" << (1.0 / rtf) << "x real-time speed)\n";
         if (!write_wav_file(output_path, audio.samples, audio.n_samples, audio.sample_rate)) {
             std::cerr << "[CLI] Failed to write WAV file.\n";
             vieneu_audio_free(&audio);
@@ -290,6 +315,9 @@ int main(int argc, char* argv[]) {
     if (!voices_json_path.empty()) {
         params.voices_json_path = voices_json_path.c_str();
     }
+    if (n_threads > 0) {
+        params.n_threads = n_threads;
+    }
 
     vieneu_context* ctx = vieneu_init(&params);
     if (!ctx) {
@@ -317,14 +345,25 @@ int main(int argc, char* argv[]) {
     vieneu_audio audio;
     memset(&audio, 0, sizeof(audio));
 
-    if (vieneu_synthesize(ctx, &tts_params, &audio) != 0) {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    int synth_status = vieneu_synthesize(ctx, &tts_params, &audio);
+    auto end_time = std::chrono::high_resolution_clock::now();
+
+    if (synth_status != 0) {
         std::cerr << "[CLI] Synthesis failed: " << vieneu_last_error() << "\n";
         vieneu_free(ctx);
         return 1;
     }
 
+    double elapsed_sec = std::chrono::duration<double>(end_time - start_time).count();
+    double audio_dur_sec = (double)audio.n_samples / audio.sample_rate;
+    double rtf = elapsed_sec / audio_dur_sec;
+
     std::cout << "[CLI] Synthesis successful. n_samples=" << audio.n_samples 
               << ", sample_rate=" << audio.sample_rate << "Hz\n";
+    std::cout << "[CLI] Inference time (model execution): " << elapsed_sec << "s (" << (elapsed_sec * 1000.0) << " ms)\n";
+    std::cout << "[CLI] Audio duration: " << audio_dur_sec << "s\n";
+    std::cout << "[CLI] Real-Time Factor (RTF): " << rtf << " (" << (1.0 / rtf) << "x real-time speed)\n";
 
     std::cout << "[CLI] Writing output file: " << output_path << "\n";
     if (!write_wav_file(output_path, audio.samples, audio.n_samples, audio.sample_rate)) {

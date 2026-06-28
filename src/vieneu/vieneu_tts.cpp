@@ -276,7 +276,7 @@ VIENEU_API struct vieneu_context * vieneu_init_v2(const struct vieneu_init_param
     init.config_path = params->config_path ? params->config_path : "";
     init.tokenizer_path = params->tokenizer_path ? params->tokenizer_path : "";
     init.voices_json_path = params->voices_json_path ? params->voices_json_path : "";
-    init.n_threads = params->n_threads > 0 ? params->n_threads : 4;
+    init.n_threads = params->n_threads > 0 ? params->n_threads : 0;
 
     std::string error;
     if (!ctx->vieneu_v3->initialize(init, error)) {

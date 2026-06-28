@@ -8,7 +8,7 @@
 #>
 
 param (
-    [string]$OnnxRuntimeVersion = "1.20.1",
+    [string]$OnnxRuntimeVersion = "1.24.4",
     [switch]$Clean,
     [switch]$NoPackage,
     [string]$LlamaCppRepo = "https://github.com/ggml-org/llama.cpp.git",
