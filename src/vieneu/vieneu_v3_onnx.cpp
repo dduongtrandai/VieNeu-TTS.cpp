@@ -12,6 +12,7 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -599,6 +600,13 @@ bool VieneuV3OnnxEngine::load_session(const std::string& path, std::unique_ptr<O
     }
 }
 
+void VieneuV3OnnxEngine::cache_session_io(Ort::Session& session, SessionIo& io) {
+    io.input_names = session_input_names(session);
+    io.output_names = session_output_names(session);
+    io.input_ptrs = name_ptrs(io.input_names);
+    io.output_ptrs = name_ptrs(io.output_names);
+}
+
 bool VieneuV3OnnxEngine::load_voices(const std::string& voices_path, std::string& error) {
     voices_json_.clear();
     if (voices_path.empty()) {
@@ -819,11 +827,10 @@ bool VieneuV3OnnxEngine::encode_reference_audio(
             if (!load_session(codec_encode_path_, codec_encode_session_, error)) {
                 return false;
             }
+            cache_session_io(*codec_encode_session_, codec_encode_io_);
         }
         auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        const std::vector<std::string> input_names = session_input_names(*codec_encode_session_);
-        const std::vector<std::string> output_names = session_output_names(*codec_encode_session_);
-        if (input_names.size() != 2 || output_names.empty()) {
+        if (codec_encode_io_.input_names.size() != 2 || codec_encode_io_.output_names.empty()) {
             error = "MOSS codec encode ONNX signature mismatch: expected 2 inputs and at least 1 output.";
             return false;
         }
@@ -834,9 +841,13 @@ bool VieneuV3OnnxEngine::encode_reference_audio(
         std::vector<Ort::Value> inputs;
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, stereo.data(), stereo.size(), wav_shape.data(), wav_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, lengths.data(), lengths.size(), len_shape.data(), len_shape.size()));
-        const std::vector<const char*> input_ptrs = name_ptrs(input_names);
-        const std::vector<const char*> output_ptrs = name_ptrs(output_names);
-        auto out = codec_encode_session_->Run(Ort::RunOptions{nullptr}, input_ptrs.data(), inputs.data(), inputs.size(), output_ptrs.data(), output_ptrs.size());
+        auto out = codec_encode_session_->Run(
+            Ort::RunOptions{nullptr},
+            codec_encode_io_.input_ptrs.data(),
+            inputs.data(),
+            inputs.size(),
+            codec_encode_io_.output_ptrs.data(),
+            codec_encode_io_.output_ptrs.size());
         const std::vector<int64_t> shape = tensor_shape(out[0]);
         if (shape.size() != 3) {
             error = "MOSS codec encode returned unexpected rank.";
@@ -902,6 +913,11 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     codec_decode_session_.reset();
     codec_encode_session_.reset();
     session_options_.reset();
+    prefill_io_ = SessionIo{};
+    decode_io_ = SessionIo{};
+    acoustic_io_ = SessionIo{};
+    codec_decode_io_ = SessionIo{};
+    codec_encode_io_ = SessionIo{};
     codec_encode_path_.clear();
     rng_.seed(std::random_device{}());
 
@@ -927,7 +943,9 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
 
     env_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "VieneuV3Onnx");
     session_options_ = std::make_unique<Ort::SessionOptions>();
-    session_options_->SetIntraOpNumThreads(init.n_threads > 0 ? init.n_threads : 4);
+    if (init.n_threads > 0) {
+        session_options_->SetIntraOpNumThreads(init.n_threads);
+    }
     session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     if (!load_session(join_path(onnx_dir_, "vieneu_prefill.onnx"), prefill_session_, error) ||
@@ -936,6 +954,10 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
         !load_session(join_path(codec_dir_, "moss_audio_tokenizer_decode_full.onnx"), codec_decode_session_, error)) {
         return false;
     }
+    cache_session_io(*prefill_session_, prefill_io_);
+    cache_session_io(*decode_session_, decode_io_);
+    cache_session_io(*acoustic_session_, acoustic_io_);
+    cache_session_io(*codec_decode_session_, codec_decode_io_);
 
     if (!load_voices(init.voices_json_path, error)) {
         return false;
@@ -1075,14 +1097,10 @@ bool VieneuV3OnnxEngine::acoustic_frame(
         std::vector<int64_t> pos_shape = {1, 2};
 
         auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        const std::vector<std::string> input_names = session_input_names(*acoustic_session_);
-        const std::vector<std::string> output_names = session_output_names(*acoustic_session_);
-        if (input_names.size() != 6 || output_names.size() != 5) {
+        if (acoustic_io_.input_names.size() != 6 || acoustic_io_.output_names.size() != 5) {
             error = "VieNeu v3 acoustic ONNX signature mismatch: expected 6 inputs and 5 outputs.";
             return false;
         }
-        const std::vector<const char*> input_ptrs = name_ptrs(input_names);
-        const std::vector<const char*> output_ptrs = name_ptrs(output_names);
         std::vector<Ort::Value> inputs;
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, token.data(), token.size(), token_shape.data(), token_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, pos.data(), pos.size(), pos_shape.data(), pos_shape.size()));
@@ -1090,7 +1108,13 @@ bool VieneuV3OnnxEngine::acoustic_frame(
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, empty.data(), 0, empty_shape.data(), empty_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, empty.data(), 0, empty_shape.data(), empty_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, empty.data(), 0, empty_shape.data(), empty_shape.size()));
-        auto out = acoustic_session_->Run(Ort::RunOptions{nullptr}, input_ptrs.data(), inputs.data(), inputs.size(), output_ptrs.data(), output_ptrs.size());
+        auto out = acoustic_session_->Run(
+            Ort::RunOptions{nullptr},
+            acoustic_io_.input_ptrs.data(),
+            inputs.data(),
+            inputs.size(),
+            acoustic_io_.output_ptrs.data(),
+            acoustic_io_.output_ptrs.size());
         TensorBlob hidden = copy_float_tensor(out[0]);
         TensorBlob pk0 = copy_float_tensor(out[1]);
         TensorBlob pk1 = copy_float_tensor(out[2]);
@@ -1129,7 +1153,13 @@ bool VieneuV3OnnxEngine::acoustic_frame(
             step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pk1.data.data(), pk1.data.size(), pk1.shape.data(), pk1.shape.size()));
             step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pv0.data.data(), pv0.data.size(), pv0.shape.data(), pv0.shape.size()));
             step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pv1.data.data(), pv1.data.size(), pv1.shape.data(), pv1.shape.size()));
-            auto step_out = acoustic_session_->Run(Ort::RunOptions{nullptr}, input_ptrs.data(), step_inputs.data(), step_inputs.size(), output_ptrs.data(), output_ptrs.size());
+            auto step_out = acoustic_session_->Run(
+                Ort::RunOptions{nullptr},
+                acoustic_io_.input_ptrs.data(),
+                step_inputs.data(),
+                step_inputs.size(),
+                acoustic_io_.output_ptrs.data(),
+                acoustic_io_.output_ptrs.size());
             hidden = copy_float_tensor(step_out[0]);
             pk0 = copy_float_tensor(step_out[1]);
             pk1 = copy_float_tensor(step_out[2]);
@@ -1162,18 +1192,20 @@ bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_
         std::vector<int64_t> codes_shape = {1, frame_count, config_.n_vq};
         std::vector<int64_t> len_shape = {1};
         auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        const std::vector<std::string> input_names = session_input_names(*codec_decode_session_);
-        const std::vector<std::string> output_names = session_output_names(*codec_decode_session_);
-        if (input_names.size() != 2 || output_names.empty()) {
+        if (codec_decode_io_.input_names.size() != 2 || codec_decode_io_.output_names.empty()) {
             error = "MOSS codec decode ONNX signature mismatch: expected 2 inputs and at least 1 output.";
             return false;
         }
-        const std::vector<const char*> input_ptrs = name_ptrs(input_names);
-        const std::vector<const char*> output_ptrs = name_ptrs(output_names);
         std::vector<Ort::Value> inputs;
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, codes.data(), codes.size(), codes_shape.data(), codes_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, lengths.data(), lengths.size(), len_shape.data(), len_shape.size()));
-        auto out = codec_decode_session_->Run(Ort::RunOptions{nullptr}, input_ptrs.data(), inputs.data(), inputs.size(), output_ptrs.data(), output_ptrs.size());
+        auto out = codec_decode_session_->Run(
+            Ort::RunOptions{nullptr},
+            codec_decode_io_.input_ptrs.data(),
+            inputs.data(),
+            inputs.size(),
+            codec_decode_io_.output_ptrs.data(),
+            codec_decode_io_.output_ptrs.size());
         TensorBlob audio = copy_float_tensor(out[0]);
         if (audio.shape.size() == 3 && audio.shape[0] == 1) {
             const int64_t channels = audio.shape[1];
@@ -1212,17 +1244,19 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
 
     std::lock_guard<std::mutex> lock(run_mutex_);
     try {
-        const std::vector<std::string> pre_input_names = session_input_names(*prefill_session_);
-        const std::vector<std::string> pre_output_names = session_output_names(*prefill_session_);
         const size_t expected_lm_outputs = static_cast<size_t>(1 + config_.num_hidden_layers * 2);
-        if (pre_input_names.size() != 1 || pre_output_names.size() != expected_lm_outputs) {
+        if (prefill_io_.input_names.size() != 1 || prefill_io_.output_names.size() != expected_lm_outputs) {
             error = "VieNeu v3 prefill ONNX signature mismatch.";
             return false;
         }
-        const std::vector<const char*> pre_input_ptrs = name_ptrs(pre_input_names);
-        const std::vector<const char*> pre_output_ptrs = name_ptrs(pre_output_names);
         Ort::Value prompt_tensor = Ort::Value::CreateTensor<float>(mem, prompt_embeds.data(), prompt_embeds.size(), prompt_shape.data(), prompt_shape.size());
-        auto pre = prefill_session_->Run(Ort::RunOptions{nullptr}, pre_input_ptrs.data(), &prompt_tensor, 1, pre_output_ptrs.data(), pre_output_ptrs.size());
+        auto pre = prefill_session_->Run(
+            Ort::RunOptions{nullptr},
+            prefill_io_.input_ptrs.data(),
+            &prompt_tensor,
+            1,
+            prefill_io_.output_ptrs.data(),
+            prefill_io_.output_ptrs.size());
         TensorBlob hidden_blob = copy_float_tensor(pre[0]);
         std::vector<TensorBlob> past_k;
         std::vector<TensorBlob> past_v;
@@ -1235,15 +1269,11 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
         const int64_t last_offset = (rows.rows - 1) * config_.hidden_size;
         std::copy(hidden_blob.data.begin() + last_offset, hidden_blob.data.begin() + last_offset + config_.hidden_size, h.begin());
 
-        const std::vector<std::string> decode_input_names = session_input_names(*decode_session_);
-        const std::vector<std::string> decode_output_names = session_output_names(*decode_session_);
         const size_t expected_decode_inputs = static_cast<size_t>(2 + config_.num_hidden_layers * 2);
-        if (decode_input_names.size() != expected_decode_inputs || decode_output_names.size() != expected_lm_outputs) {
+        if (decode_io_.input_names.size() != expected_decode_inputs || decode_io_.output_names.size() != expected_lm_outputs) {
             error = "VieNeu v3 decode-step ONNX signature mismatch.";
             return false;
         }
-        const std::vector<const char*> decode_input_ptrs = name_ptrs(decode_input_names);
-        const std::vector<const char*> decode_output_ptrs = name_ptrs(decode_output_names);
 
         std::vector<std::unordered_set<int>> history;
         if (std::fabs(params.repetition_penalty - 1.0f) > 1e-6f) {
@@ -1275,11 +1305,18 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             std::vector<int64_t> pos_shape = {1, 1};
 
             std::vector<Ort::Value> inputs;
+            inputs.reserve(static_cast<size_t>(expected_decode_inputs));
             inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, se.data(), se.size(), se_shape.data(), se_shape.size()));
             inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, pos.data(), pos.size(), pos_shape.data(), pos_shape.size()));
             for (auto& pk : past_k) inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pk.data.data(), pk.data.size(), pk.shape.data(), pk.shape.size()));
             for (auto& pv : past_v) inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pv.data.data(), pv.data.size(), pv.shape.data(), pv.shape.size()));
-            auto dec = decode_session_->Run(Ort::RunOptions{nullptr}, decode_input_ptrs.data(), inputs.data(), inputs.size(), decode_output_ptrs.data(), decode_output_ptrs.size());
+            auto dec = decode_session_->Run(
+                Ort::RunOptions{nullptr},
+                decode_io_.input_ptrs.data(),
+                inputs.data(),
+                inputs.size(),
+                decode_io_.output_ptrs.data(),
+                decode_io_.output_ptrs.size());
             TensorBlob dec_hidden = copy_float_tensor(dec[0]);
             std::copy(dec_hidden.data.begin(), dec_hidden.data.begin() + config_.hidden_size, h.begin());
             for (int i = 0; i < config_.num_hidden_layers; ++i) past_k[static_cast<size_t>(i)] = copy_float_tensor(dec[1 + i]);

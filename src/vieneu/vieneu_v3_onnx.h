@@ -92,6 +92,13 @@ private:
         std::vector<int64_t> codes;
     };
 
+    struct SessionIo {
+        std::vector<std::string> input_names;
+        std::vector<std::string> output_names;
+        std::vector<const char*> input_ptrs;
+        std::vector<const char*> output_ptrs;
+    };
+
     struct ByteBpeTokenizer {
         bool load(const std::string& path, std::string& error);
         std::vector<int64_t> encode(const std::string& text) const;
@@ -106,6 +113,7 @@ private:
     static bool read_text_file(const std::string& path, std::string& out);
 
     bool load_session(const std::string& path, std::unique_ptr<Ort::Session>& session, std::string& error);
+    void cache_session_io(Ort::Session& session, SessionIo& io);
     bool validate_assets(const VieneuV3OnnxInit& init, std::string& error);
     bool load_voices(const std::string& voices_path, std::string& error);
     bool load_config(const std::string& path, std::string& error);
@@ -148,6 +156,11 @@ private:
     std::unique_ptr<Ort::Session> acoustic_session_;
     std::unique_ptr<Ort::Session> codec_decode_session_;
     std::unique_ptr<Ort::Session> codec_encode_session_;
+    SessionIo prefill_io_;
+    SessionIo decode_io_;
+    SessionIo acoustic_io_;
+    SessionIo codec_decode_io_;
+    SessionIo codec_encode_io_;
     std::string codec_encode_path_;
     std::string voices_json_;
     Config config_;
