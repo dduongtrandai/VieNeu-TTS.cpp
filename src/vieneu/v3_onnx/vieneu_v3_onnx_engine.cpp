@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -80,6 +81,34 @@ bool append_requested_execution_provider(Ort::SessionOptions& options, std::stri
 
 // --- VieneuV3OnnxEngine Orchestrator Member Functions ---
 
+void VieneuV3OnnxEngine::reset_benchmark_stats() {
+    benchmark_stats_ = BenchmarkStats{};
+}
+
+void VieneuV3OnnxEngine::print_benchmark_stats() const {
+    if (!benchmark_enabled_) {
+        return;
+    }
+
+    const auto avg = [](double total_ms, int64_t calls) -> double {
+        return calls > 0 ? total_ms / static_cast<double>(calls) : 0.0;
+    };
+
+    std::cerr << "[VieNeu v3] Benchmark summary\n"
+              << "  prefill: total=" << benchmark_stats_.prefill_ms << " ms"
+              << ", calls=" << benchmark_stats_.prefill_calls
+              << ", avg=" << avg(benchmark_stats_.prefill_ms, benchmark_stats_.prefill_calls) << " ms\n"
+              << "  decode_step: total=" << benchmark_stats_.decode_step_ms << " ms"
+              << ", calls=" << benchmark_stats_.decode_step_calls
+              << ", avg=" << avg(benchmark_stats_.decode_step_ms, benchmark_stats_.decode_step_calls) << " ms\n"
+              << "  acoustic_frame: total=" << benchmark_stats_.acoustic_frame_ms << " ms"
+              << ", calls=" << benchmark_stats_.acoustic_frame_calls
+              << ", avg=" << avg(benchmark_stats_.acoustic_frame_ms, benchmark_stats_.acoustic_frame_calls) << " ms\n"
+              << "  codec_decode: total=" << benchmark_stats_.codec_decode_ms << " ms"
+              << ", calls=" << benchmark_stats_.codec_decode_calls
+              << ", avg=" << avg(benchmark_stats_.codec_decode_ms, benchmark_stats_.codec_decode_calls) << " ms\n";
+}
+
 bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& error) {
     initialized_ = false;
     env_.reset();
@@ -98,6 +127,7 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     voices_json_.clear();
     default_voice_id_.clear();
     voice_presets_.clear();
+    benchmark_enabled_ = env_enabled("VIENEU_BENCHMARK");
     rng_.seed(std::random_device{}());
 
     if (init.model_dir.empty() && init.onnx_dir.empty()) {
@@ -128,10 +158,8 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
         threads_to_use = hardware_threads > 0 ? std::max(1, static_cast<int>(std::min(hardware_threads / 2, 4u))) : 4;
     }
     session_options_->SetIntraOpNumThreads(threads_to_use);
-    const int inter_op_threads = env_int("VIENEU_ORT_INTER_OP_THREADS", 0);
-    if (inter_op_threads > 0) {
-        session_options_->SetInterOpNumThreads(inter_op_threads);
-    }
+    const int inter_op_threads = env_int("VIENEU_ORT_INTER_OP_THREADS", 1);
+    session_options_->SetInterOpNumThreads((std::max)(1, inter_op_threads));
     const std::string execution_mode = lowercase(getenv_string("VIENEU_ORT_EXECUTION_MODE"));
     if (execution_mode == "parallel") {
         session_options_->SetExecutionMode(ORT_PARALLEL);
@@ -139,6 +167,11 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
         session_options_->SetExecutionMode(ORT_SEQUENTIAL);
     }
     session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_options_->EnableCpuMemArena();
+    if (env_enabled("VIENEU_ORT_DISABLE_SPIN")) {
+        session_options_->AddConfigEntry("session.intra_op.allow_spinning", "0");
+        session_options_->AddConfigEntry("session.inter_op.allow_spinning", "0");
+    }
 
     if (!append_requested_execution_provider(*session_options_, error)) {
         return false;
@@ -188,6 +221,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
     std::vector<float>& out_audio,
     std::string& error) {
     out_audio.clear();
+    reset_benchmark_stats();
     const PromptRows rows = build_rows(phonemes, ref_codes, leading_token);
     std::vector<float> prompt_embeds = embed_rows(rows);
     std::vector<int64_t> prompt_shape = {1, rows.rows, config_.hidden_size};
@@ -201,6 +235,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             return false;
         }
         Ort::Value prompt_tensor = Ort::Value::CreateTensor<float>(mem, prompt_embeds.data(), prompt_embeds.size(), prompt_shape.data(), prompt_shape.size());
+        const auto prefill_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         auto pre = prefill_session_->Run(
             Ort::RunOptions{nullptr},
             prefill_io_.input_ptrs.data(),
@@ -208,6 +243,11 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             1,
             prefill_io_.output_ptrs.data(),
             prefill_io_.output_ptrs.size());
+        if (benchmark_enabled_) {
+            const auto prefill_end = std::chrono::steady_clock::now();
+            benchmark_stats_.prefill_ms += std::chrono::duration<double, std::milli>(prefill_end - prefill_start).count();
+            benchmark_stats_.prefill_calls += 1;
+        }
         const float* hidden_data = pre[0].GetTensorData<float>();
         std::vector<Ort::Value> past_k;
         std::vector<Ort::Value> past_v;
@@ -220,9 +260,9 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             past_v.push_back(std::move(pre[1 + config_.num_hidden_layers + i]));
         }
 
-        std::vector<float> h(static_cast<size_t>(config_.hidden_size));
+        synth_h_.resize(static_cast<size_t>(config_.hidden_size));
         const int64_t last_offset = (rows.rows - 1) * config_.hidden_size;
-        std::copy(hidden_data + last_offset, hidden_data + last_offset + config_.hidden_size, h.begin());
+        std::copy(hidden_data + last_offset, hidden_data + last_offset + config_.hidden_size, synth_h_.begin());
 
         const size_t expected_decode_inputs = static_cast<size_t>(2 + config_.num_hidden_layers * 2);
         if (decode_io_.input_names.size() != expected_decode_inputs || decode_io_.output_names.size() != expected_lm_outputs) {
@@ -239,12 +279,13 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
         frames.reserve(static_cast<size_t>(max_frames * config_.n_vq));
         std::vector<int64_t> codes;
         codes.reserve(static_cast<size_t>(config_.n_vq));
-        std::vector<float> se(static_cast<size_t>(config_.hidden_size));
+        synth_se_.resize(static_cast<size_t>(config_.hidden_size));
         std::array<int64_t, 3> se_shape = {1, 1, config_.hidden_size};
         std::array<int64_t, 2> pos_shape = {1, 1};
+        synth_decode_inputs_.reserve(static_cast<size_t>(expected_decode_inputs));
         for (int t = 0; t < max_frames; ++t) {
             bool eos = false;
-            if (!acoustic_frame(h, params.temperature, params.top_k, params.top_p, params.repetition_penalty, history, codes, eos, error)) {
+            if (!acoustic_frame(synth_h_, params.temperature, params.top_k, params.top_p, params.repetition_penalty, history, codes, eos, error)) {
                 return false;
             }
             frames.insert(frames.end(), codes.begin(), codes.end());
@@ -253,7 +294,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             }
 
             const float* sgs = text_emb_.data.data() + config_.speech_generation_start_token_id * text_emb_.cols;
-            std::copy(sgs, sgs + config_.hidden_size, se.begin());
+            std::copy(sgs, sgs + config_.hidden_size, synth_se_.begin());
             for (int ch = 0; ch < config_.n_vq; ++ch) {
                 const int64_t id = codes[static_cast<size_t>(ch)];
                 if (id == config_.audio_pad_token_id || id < 0 || id >= audio_emb_.dim1) {
@@ -262,26 +303,31 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
                 const float* src = audio_emb_.data.data() +
                     (static_cast<int64_t>(ch) * audio_emb_.dim1 + id) * audio_emb_.dim2;
                 for (int h_idx = 0; h_idx < config_.hidden_size; ++h_idx) {
-                    se[static_cast<size_t>(h_idx)] += src[h_idx];
+                    synth_se_[static_cast<size_t>(h_idx)] += src[h_idx];
                 }
             }
             int64_t pos = rows.rows + t;
 
-            std::vector<Ort::Value> inputs;
-            inputs.reserve(static_cast<size_t>(expected_decode_inputs));
-            inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, se.data(), se.size(), se_shape.data(), se_shape.size()));
-            inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, &pos, 1, pos_shape.data(), pos_shape.size()));
-            for (auto& pk : past_k) inputs.emplace_back(std::move(pk));
-            for (auto& pv : past_v) inputs.emplace_back(std::move(pv));
+            synth_decode_inputs_.clear();
+            synth_decode_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, synth_se_.data(), synth_se_.size(), se_shape.data(), se_shape.size()));
+            synth_decode_inputs_.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, &pos, 1, pos_shape.data(), pos_shape.size()));
+            for (auto& pk : past_k) synth_decode_inputs_.emplace_back(std::move(pk));
+            for (auto& pv : past_v) synth_decode_inputs_.emplace_back(std::move(pv));
+            const auto decode_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             auto dec = decode_session_->Run(
                 Ort::RunOptions{nullptr},
                 decode_io_.input_ptrs.data(),
-                inputs.data(),
-                inputs.size(),
+                synth_decode_inputs_.data(),
+                synth_decode_inputs_.size(),
                 decode_io_.output_ptrs.data(),
                 decode_io_.output_ptrs.size());
+            if (benchmark_enabled_) {
+                const auto decode_end = std::chrono::steady_clock::now();
+                benchmark_stats_.decode_step_ms += std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
+                benchmark_stats_.decode_step_calls += 1;
+            }
             const float* dec_hidden = dec[0].GetTensorData<float>();
-            std::copy(dec_hidden, dec_hidden + config_.hidden_size, h.begin());
+            std::copy(dec_hidden, dec_hidden + config_.hidden_size, synth_h_.begin());
             for (int i = 0; i < config_.num_hidden_layers; ++i) {
                 past_k[static_cast<size_t>(i)] = std::move(dec[1 + i]);
             }
@@ -292,10 +338,14 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
 
         if (frames.empty()) {
             error = "VieNeu v3 synthesis produced no acoustic frames.";
+            print_benchmark_stats();
             return false;
         }
-        return decode_codes(frames, static_cast<int64_t>(frames.size() / config_.n_vq), out_audio, error);
+        const bool ok = decode_codes(frames, static_cast<int64_t>(frames.size() / config_.n_vq), out_audio, error);
+        print_benchmark_stats();
+        return ok;
     } catch (const std::exception& e) {
+        print_benchmark_stats();
         error = std::string("VieNeu v3 synthesis failed: ") + e.what();
         return false;
     }

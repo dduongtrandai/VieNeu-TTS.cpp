@@ -100,6 +100,17 @@ private:
         std::vector<const char*> output_ptrs;
     };
 
+    struct BenchmarkStats {
+        double prefill_ms = 0.0;
+        double decode_step_ms = 0.0;
+        double acoustic_frame_ms = 0.0;
+        double codec_decode_ms = 0.0;
+        int64_t prefill_calls = 0;
+        int64_t decode_step_calls = 0;
+        int64_t acoustic_frame_calls = 0;
+        int64_t codec_decode_calls = 0;
+    };
+
     struct ByteBpeTokenizer {
         bool load(const std::string& path, std::string& error);
         std::vector<int64_t> encode(const std::string& text) const;
@@ -149,6 +160,8 @@ private:
                           const std::unordered_set<int>* previous);
     bool decode_codes(const std::vector<int64_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
     std::string phonemize_for_v3(const std::string& text) const;
+    void reset_benchmark_stats();
+    void print_benchmark_stats() const;
 
     std::shared_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::SessionOptions> session_options_;
@@ -178,11 +191,24 @@ private:
     std::mutex run_mutex_;
     std::mt19937 rng_;
     bool initialized_ = false;
+    bool benchmark_enabled_ = false;
+    BenchmarkStats benchmark_stats_;
 
     // Scratch buffers for sampling to avoid allocation overhead
     std::vector<float> sampling_tmp_;
     std::vector<std::pair<float, size_t>> sampling_pairs_;
     std::vector<float> sampling_probs_;
+
+    std::vector<float> synth_h_;
+    std::vector<float> synth_se_;
+    std::vector<Ort::Value> synth_decode_inputs_;
+    std::vector<float> acoustic_token_;
+    std::vector<float> acoustic_empty_;
+    std::vector<float> acoustic_slot0_;
+    std::vector<float> acoustic_logits_;
+    std::vector<float> acoustic_text_logits_;
+    std::vector<Ort::Value> acoustic_inputs_;
+    std::vector<Ort::Value> acoustic_step_inputs_;
 };
 
 #endif // VIENEU_V3_ONNX_H

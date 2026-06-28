@@ -2,6 +2,7 @@
 #include "vieneu_v3_onnx_internal.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -231,6 +232,7 @@ bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_
         std::vector<Ort::Value> inputs;
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, codes.data(), codes.size(), codes_shape.data(), codes_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, lengths.data(), lengths.size(), len_shape.data(), len_shape.size()));
+        const auto decode_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         auto out = codec_decode_session_->Run(
             Ort::RunOptions{nullptr},
             codec_decode_io_.input_ptrs.data(),
@@ -238,6 +240,11 @@ bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_
             inputs.size(),
             codec_decode_io_.output_ptrs.data(),
             codec_decode_io_.output_ptrs.size());
+        if (benchmark_enabled_) {
+            const auto decode_end = std::chrono::steady_clock::now();
+            benchmark_stats_.codec_decode_ms += std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
+            benchmark_stats_.codec_decode_calls += 1;
+        }
         TensorBlob audio = copy_float_tensor(out[0]);
         if (audio.shape.size() == 3 && audio.shape[0] == 1) {
             const int64_t channels = audio.shape[1];
