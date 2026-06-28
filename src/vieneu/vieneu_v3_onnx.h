@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "onnxruntime_cxx_api.h"
@@ -177,6 +178,11 @@ private:
     std::mutex run_mutex_;
     std::mt19937 rng_;
     bool initialized_ = false;
+
+    // Scratch buffers for sampling to avoid allocation overhead
+    std::vector<float> sampling_tmp_;
+    std::vector<std::pair<float, size_t>> sampling_pairs_;
+    std::vector<float> sampling_probs_;
 };
 
 #endif // VIENEU_V3_ONNX_H

@@ -2,6 +2,7 @@
 #include "vieneu_v3_onnx_internal.h"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -82,11 +83,11 @@ bool VieneuV3OnnxEngine::acoustic_frame(
         std::copy(h.begin(), h.begin() + H, token.begin());
         const float* sgs = text_emb_.data.data() + config_.speech_generation_start_token_id * text_emb_.cols;
         std::copy(sgs, sgs + H, token.begin() + H);
-        std::vector<int64_t> pos = {0, 1};
+        std::array<int64_t, 2> pos = {0, 1};
         std::vector<float> empty;
-        std::vector<int64_t> empty_shape = {1, nH, 0, hd};
-        std::vector<int64_t> token_shape = {1, 2, H};
-        std::vector<int64_t> pos_shape = {1, 2};
+        std::array<int64_t, 4> empty_shape = {1, nH, 0, hd};
+        std::array<int64_t, 3> token_shape = {1, 2, H};
+        std::array<int64_t, 2> pos_shape = {1, 2};
 
         auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         if (acoustic_io_.input_names.size() != 6 || acoustic_io_.output_names.size() != 5) {
@@ -94,6 +95,7 @@ bool VieneuV3OnnxEngine::acoustic_frame(
             return false;
         }
         std::vector<Ort::Value> inputs;
+        inputs.reserve(6);
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, token.data(), token.size(), token_shape.data(), token_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, pos.data(), pos.size(), pos_shape.data(), pos_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, empty.data(), 0, empty_shape.data(), empty_shape.size()));
@@ -107,12 +109,14 @@ bool VieneuV3OnnxEngine::acoustic_frame(
             inputs.size(),
             acoustic_io_.output_ptrs.data(),
             acoustic_io_.output_ptrs.size());
-        TensorBlob hidden = copy_float_tensor(out[0]);
-        TensorBlob pk0 = copy_float_tensor(out[1]);
-        TensorBlob pk1 = copy_float_tensor(out[2]);
-        TensorBlob pv0 = copy_float_tensor(out[3]);
-        TensorBlob pv1 = copy_float_tensor(out[4]);
-        std::vector<float> slot0(hidden.data.begin(), hidden.data.begin() + H);
+        Ort::Value hidden_val = std::move(out[0]);
+        Ort::Value pk0 = std::move(out[1]);
+        Ort::Value pk1 = std::move(out[2]);
+        Ort::Value pv0 = std::move(out[3]);
+        Ort::Value pv1 = std::move(out[4]);
+
+        const float* hidden_ptr = hidden_val.GetTensorData<float>();
+        std::vector<float> slot0(hidden_ptr, hidden_ptr + H);
 
         std::vector<float> logits;
         auto sample_channel = [&](int ch, const float* vec) {
@@ -126,21 +130,21 @@ bool VieneuV3OnnxEngine::acoustic_frame(
 
         codes.clear();
         codes.reserve(static_cast<size_t>(config_.n_vq));
-        codes.push_back(sample_channel(0, hidden.data.data() + H));
+        codes.push_back(sample_channel(0, hidden_ptr + H));
         for (int ch = 1; ch < config_.n_vq; ++ch) {
             const float* emb = audio_emb_.data.data() +
                 (static_cast<int64_t>(ch - 1) * audio_emb_.dim1 + codes.back()) * audio_emb_.dim2;
-            std::vector<float> step_token(emb, emb + H);
-            std::vector<int64_t> step_pos = {ch + 1};
-            std::vector<int64_t> step_token_shape = {1, 1, H};
-            std::vector<int64_t> step_pos_shape = {1, 1};
+            int64_t step_pos = ch + 1;
+            std::array<int64_t, 3> step_token_shape = {1, 1, H};
+            std::array<int64_t, 2> step_pos_shape = {1, 1};
             std::vector<Ort::Value> step_inputs;
-            step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, step_token.data(), step_token.size(), step_token_shape.data(), step_token_shape.size()));
-            step_inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, step_pos.data(), step_pos.size(), step_pos_shape.data(), step_pos_shape.size()));
-            step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pk0.data.data(), pk0.data.size(), pk0.shape.data(), pk0.shape.size()));
-            step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pk1.data.data(), pk1.data.size(), pk1.shape.data(), pk1.shape.size()));
-            step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pv0.data.data(), pv0.data.size(), pv0.shape.data(), pv0.shape.size()));
-            step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pv1.data.data(), pv1.data.size(), pv1.shape.data(), pv1.shape.size()));
+            step_inputs.reserve(6);
+            step_inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, const_cast<float*>(emb), static_cast<size_t>(H), step_token_shape.data(), step_token_shape.size()));
+            step_inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, &step_pos, 1, step_pos_shape.data(), step_pos_shape.size()));
+            step_inputs.emplace_back(std::move(pk0));
+            step_inputs.emplace_back(std::move(pk1));
+            step_inputs.emplace_back(std::move(pv0));
+            step_inputs.emplace_back(std::move(pv1));
             auto step_out = acoustic_session_->Run(
                 Ort::RunOptions{nullptr},
                 acoustic_io_.input_ptrs.data(),
@@ -148,12 +152,14 @@ bool VieneuV3OnnxEngine::acoustic_frame(
                 step_inputs.size(),
                 acoustic_io_.output_ptrs.data(),
                 acoustic_io_.output_ptrs.size());
-            copy_float_tensor_into(step_out[0], hidden);
-            copy_float_tensor_into(step_out[1], pk0);
-            copy_float_tensor_into(step_out[2], pk1);
-            copy_float_tensor_into(step_out[3], pv0);
-            copy_float_tensor_into(step_out[4], pv1);
-            codes.push_back(sample_channel(ch, hidden.data.data()));
+            hidden_val = std::move(step_out[0]);
+            pk0 = std::move(step_out[1]);
+            pk1 = std::move(step_out[2]);
+            pv0 = std::move(step_out[3]);
+            pv1 = std::move(step_out[4]);
+            
+            const float* step_hidden_ptr = hidden_val.GetTensorData<float>();
+            codes.push_back(sample_channel(ch, step_hidden_ptr));
         }
 
         std::vector<float> text_logits;

@@ -3,12 +3,80 @@
 #include "../vieneu.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdlib>
 #include <cmath>
+#include <iostream>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
+#include <thread>
+
+namespace {
+
+std::string getenv_string(const char* name) {
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+}
+
+std::string lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool env_enabled(const char* name) {
+    const std::string value = lowercase(getenv_string(name));
+    return !value.empty() && value != "0" && value != "false" && value != "off" && value != "no";
+}
+
+int env_int(const char* name, int fallback) {
+    const std::string value = getenv_string(name);
+    if (value.empty()) {
+        return fallback;
+    }
+    try {
+        return std::stoi(value);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool append_requested_execution_provider(Ort::SessionOptions& options, std::string& error) {
+    const std::string requested = lowercase(getenv_string("VIENEU_ORT_EP"));
+    if (requested.empty() || requested == "cpu") {
+        return true;
+    }
+
+    try {
+        if (requested == "cuda") {
+            Ort::CUDAProviderOptions cuda_options;
+            const int device_id = env_int("VIENEU_ORT_CUDA_DEVICE_ID", 0);
+            cuda_options.Update({{"device_id", std::to_string((std::max)(0, device_id))}});
+            options.AppendExecutionProvider_CUDA_V2(*cuda_options);
+            return true;
+        }
+
+        error = "Unsupported VIENEU_ORT_EP value: " + requested + " (supported: cpu, cuda).";
+        return false;
+    } catch (const std::exception& e) {
+        if (env_enabled("VIENEU_ORT_EP_REQUIRED")) {
+            error = "Failed to enable requested ONNX Runtime EP '" + requested + "': " + e.what();
+            return false;
+        }
+        std::cerr << "[VieNeu v3] Failed to enable ONNX Runtime EP '" << requested
+                  << "', falling back to CPU: " << e.what() << std::endl;
+        return true;
+    }
+}
+
+} // namespace
 
 // --- VieneuV3OnnxEngine Orchestrator Member Functions ---
 
@@ -54,10 +122,40 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
 
     env_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "VieneuV3Onnx");
     session_options_ = std::make_unique<Ort::SessionOptions>();
-    if (init.n_threads > 0) {
-        session_options_->SetIntraOpNumThreads(init.n_threads);
+    int threads_to_use = env_int("VIENEU_ORT_THREADS", init.n_threads);
+    if (threads_to_use <= 0) {
+        unsigned int hardware_threads = std::thread::hardware_concurrency();
+        threads_to_use = hardware_threads > 0 ? std::max(1, static_cast<int>(std::min(hardware_threads / 2, 4u))) : 4;
+    }
+    session_options_->SetIntraOpNumThreads(threads_to_use);
+    const int inter_op_threads = env_int("VIENEU_ORT_INTER_OP_THREADS", 0);
+    if (inter_op_threads > 0) {
+        session_options_->SetInterOpNumThreads(inter_op_threads);
+    }
+    const std::string execution_mode = lowercase(getenv_string("VIENEU_ORT_EXECUTION_MODE"));
+    if (execution_mode == "parallel") {
+        session_options_->SetExecutionMode(ORT_PARALLEL);
+    } else {
+        session_options_->SetExecutionMode(ORT_SEQUENTIAL);
     }
     session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    if (!append_requested_execution_provider(*session_options_, error)) {
+        return false;
+    }
+
+    if (env_enabled("VIENEU_ORT_PROFILING")) {
+        std::string profile_prefix = getenv_string("VIENEU_ORT_PROFILE_PREFIX");
+        if (profile_prefix.empty()) {
+            profile_prefix = "vieneu_profile";
+        }
+#ifdef _WIN32
+        const std::wstring wide_profile_prefix(profile_prefix.begin(), profile_prefix.end());
+        session_options_->EnableProfiling(wide_profile_prefix.c_str());
+#else
+        session_options_->EnableProfiling(profile_prefix.c_str());
+#endif
+    }
 
     if (!load_session(join_path(onnx_dir_, "vieneu_prefill.onnx"), prefill_session_, error) ||
         !load_session(join_path(onnx_dir_, "vieneu_decode_step.onnx"), decode_session_, error) ||
@@ -110,17 +208,21 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             1,
             prefill_io_.output_ptrs.data(),
             prefill_io_.output_ptrs.size());
-        TensorBlob hidden_blob = copy_float_tensor(pre[0]);
-        std::vector<TensorBlob> past_k;
-        std::vector<TensorBlob> past_v;
+        const float* hidden_data = pre[0].GetTensorData<float>();
+        std::vector<Ort::Value> past_k;
+        std::vector<Ort::Value> past_v;
         past_k.reserve(static_cast<size_t>(config_.num_hidden_layers));
         past_v.reserve(static_cast<size_t>(config_.num_hidden_layers));
-        for (int i = 0; i < config_.num_hidden_layers; ++i) past_k.push_back(copy_float_tensor(pre[1 + i]));
-        for (int i = 0; i < config_.num_hidden_layers; ++i) past_v.push_back(copy_float_tensor(pre[1 + config_.num_hidden_layers + i]));
+        for (int i = 0; i < config_.num_hidden_layers; ++i) {
+            past_k.push_back(std::move(pre[1 + i]));
+        }
+        for (int i = 0; i < config_.num_hidden_layers; ++i) {
+            past_v.push_back(std::move(pre[1 + config_.num_hidden_layers + i]));
+        }
 
         std::vector<float> h(static_cast<size_t>(config_.hidden_size));
         const int64_t last_offset = (rows.rows - 1) * config_.hidden_size;
-        std::copy(hidden_blob.data.begin() + last_offset, hidden_blob.data.begin() + last_offset + config_.hidden_size, h.begin());
+        std::copy(hidden_data + last_offset, hidden_data + last_offset + config_.hidden_size, h.begin());
 
         const size_t expected_decode_inputs = static_cast<size_t>(2 + config_.num_hidden_layers * 2);
         if (decode_io_.input_names.size() != expected_decode_inputs || decode_io_.output_names.size() != expected_lm_outputs) {
@@ -135,8 +237,12 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
         std::vector<int64_t> frames;
         const int max_frames = (std::max)(1, params.max_new_frames);
         frames.reserve(static_cast<size_t>(max_frames * config_.n_vq));
+        std::vector<int64_t> codes;
+        codes.reserve(static_cast<size_t>(config_.n_vq));
+        std::vector<float> se(static_cast<size_t>(config_.hidden_size));
+        std::array<int64_t, 3> se_shape = {1, 1, config_.hidden_size};
+        std::array<int64_t, 2> pos_shape = {1, 1};
         for (int t = 0; t < max_frames; ++t) {
-            std::vector<int64_t> codes;
             bool eos = false;
             if (!acoustic_frame(h, params.temperature, params.top_k, params.top_p, params.repetition_penalty, history, codes, eos, error)) {
                 return false;
@@ -146,23 +252,27 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
                 break;
             }
 
-            PromptRows slot;
-            slot.rows = 1;
-            slot.cols = config_.n_vq + 1;
-            slot.data.assign(static_cast<size_t>(slot.cols), config_.audio_pad_token_id);
-            slot.data[0] = config_.speech_generation_start_token_id;
-            for (int ch = 0; ch < config_.n_vq; ++ch) slot.data[static_cast<size_t>(ch + 1)] = codes[static_cast<size_t>(ch)];
-            std::vector<float> se = embed_rows(slot);
-            std::vector<int64_t> se_shape = {1, 1, config_.hidden_size};
-            std::vector<int64_t> pos = {rows.rows + t};
-            std::vector<int64_t> pos_shape = {1, 1};
+            const float* sgs = text_emb_.data.data() + config_.speech_generation_start_token_id * text_emb_.cols;
+            std::copy(sgs, sgs + config_.hidden_size, se.begin());
+            for (int ch = 0; ch < config_.n_vq; ++ch) {
+                const int64_t id = codes[static_cast<size_t>(ch)];
+                if (id == config_.audio_pad_token_id || id < 0 || id >= audio_emb_.dim1) {
+                    continue;
+                }
+                const float* src = audio_emb_.data.data() +
+                    (static_cast<int64_t>(ch) * audio_emb_.dim1 + id) * audio_emb_.dim2;
+                for (int h_idx = 0; h_idx < config_.hidden_size; ++h_idx) {
+                    se[static_cast<size_t>(h_idx)] += src[h_idx];
+                }
+            }
+            int64_t pos = rows.rows + t;
 
             std::vector<Ort::Value> inputs;
             inputs.reserve(static_cast<size_t>(expected_decode_inputs));
             inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, se.data(), se.size(), se_shape.data(), se_shape.size()));
-            inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, pos.data(), pos.size(), pos_shape.data(), pos_shape.size()));
-            for (auto& pk : past_k) inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pk.data.data(), pk.data.size(), pk.shape.data(), pk.shape.size()));
-            for (auto& pv : past_v) inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, pv.data.data(), pv.data.size(), pv.shape.data(), pv.shape.size()));
+            inputs.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, &pos, 1, pos_shape.data(), pos_shape.size()));
+            for (auto& pk : past_k) inputs.emplace_back(std::move(pk));
+            for (auto& pv : past_v) inputs.emplace_back(std::move(pv));
             auto dec = decode_session_->Run(
                 Ort::RunOptions{nullptr},
                 decode_io_.input_ptrs.data(),
@@ -172,8 +282,12 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
                 decode_io_.output_ptrs.size());
             const float* dec_hidden = dec[0].GetTensorData<float>();
             std::copy(dec_hidden, dec_hidden + config_.hidden_size, h.begin());
-            for (int i = 0; i < config_.num_hidden_layers; ++i) copy_float_tensor_into(dec[1 + i], past_k[static_cast<size_t>(i)]);
-            for (int i = 0; i < config_.num_hidden_layers; ++i) copy_float_tensor_into(dec[1 + config_.num_hidden_layers + i], past_v[static_cast<size_t>(i)]);
+            for (int i = 0; i < config_.num_hidden_layers; ++i) {
+                past_k[static_cast<size_t>(i)] = std::move(dec[1 + i]);
+            }
+            for (int i = 0; i < config_.num_hidden_layers; ++i) {
+                past_v[static_cast<size_t>(i)] = std::move(dec[1 + config_.num_hidden_layers + i]);
+            }
         }
 
         if (frames.empty()) {

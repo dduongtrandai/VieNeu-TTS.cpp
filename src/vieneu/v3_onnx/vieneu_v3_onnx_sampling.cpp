@@ -74,30 +74,73 @@ int64_t VieneuV3OnnxEngine::sample_logits(
     for (float& v : logits) {
         v /= temperature;
     }
-    if (top_k > 0 && static_cast<size_t>(top_k) < logits.size()) {
-        std::vector<float> tmp = logits;
-        std::nth_element(tmp.begin(), tmp.end() - top_k, tmp.end());
-        const float kth = *(tmp.end() - top_k);
+    
+    const size_t N = logits.size();
+    if (top_k > 0 && static_cast<size_t>(top_k) < N) {
+        sampling_tmp_ = logits;
+        std::nth_element(sampling_tmp_.begin(), sampling_tmp_.end() - top_k, sampling_tmp_.end());
+        const float kth = *(sampling_tmp_.end() - top_k);
         for (float& v : logits) {
             if (v < kth) v = -std::numeric_limits<float>::infinity();
         }
     }
     if (top_p > 0.0f && top_p < 1.0f) {
-        std::vector<size_t> order(logits.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return logits[a] > logits[b]; });
-        std::vector<float> sorted(order.size());
-        for (size_t i = 0; i < order.size(); ++i) sorted[i] = logits[order[i]];
-        const std::vector<float> probs = softmax(sorted);
-        float cumulative_before = 0.0f;
-        for (size_t i = 0; i < order.size(); ++i) {
-            if (cumulative_before > top_p) {
-                logits[order[i]] = -std::numeric_limits<float>::infinity();
+        sampling_pairs_.clear();
+        for (size_t i = 0; i < N; ++i) {
+            if (logits[i] > -std::numeric_limits<float>::infinity()) {
+                sampling_pairs_.push_back({logits[i], i});
             }
-            cumulative_before += probs[i];
+        }
+        if (!sampling_pairs_.empty()) {
+            std::sort(sampling_pairs_.begin(), sampling_pairs_.end(),
+                      [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) {
+                          return a.first > b.first;
+                      });
+            float max_v = sampling_pairs_[0].first;
+            double sum = 0.0;
+            sampling_probs_.resize(sampling_pairs_.size());
+            for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+                double e = std::exp(static_cast<double>(sampling_pairs_[i].first - max_v));
+                sampling_probs_[i] = static_cast<float>(e);
+                sum += e;
+            }
+            if (sum > 0.0 && std::isfinite(sum)) {
+                for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+                    sampling_probs_[i] = static_cast<float>(static_cast<double>(sampling_probs_[i]) / sum);
+                }
+            } else {
+                float uniform = 1.0f / static_cast<float>(sampling_pairs_.size());
+                std::fill(sampling_probs_.begin(), sampling_probs_.end(), uniform);
+            }
+            float cumulative_before = 0.0f;
+            for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+                if (cumulative_before > top_p) {
+                    logits[sampling_pairs_[i].second] = -std::numeric_limits<float>::infinity();
+                }
+                cumulative_before += sampling_probs_[i];
+            }
         }
     }
-    const std::vector<float> probs = softmax(logits);
-    std::discrete_distribution<int64_t> dist(probs.begin(), probs.end());
+    
+    float max_v = -std::numeric_limits<float>::infinity();
+    for (float v : logits) {
+        if (v > max_v) max_v = v;
+    }
+    double sum = 0.0;
+    sampling_probs_.resize(N);
+    for (size_t i = 0; i < N; ++i) {
+        double e = std::exp(static_cast<double>(logits[i] - max_v));
+        sampling_probs_[i] = static_cast<float>(e);
+        sum += e;
+    }
+    if (sum <= 0.0 || !std::isfinite(sum)) {
+        float uniform = N == 0 ? 0.0f : 1.0f / static_cast<float>(N);
+        std::fill(sampling_probs_.begin(), sampling_probs_.end(), uniform);
+    } else {
+        for (size_t i = 0; i < N; ++i) {
+            sampling_probs_[i] = static_cast<float>(static_cast<double>(sampling_probs_[i]) / sum);
+        }
+    }
+    std::discrete_distribution<int64_t> dist(sampling_probs_.begin(), sampling_probs_.end());
     return dist(rng_);
 }
