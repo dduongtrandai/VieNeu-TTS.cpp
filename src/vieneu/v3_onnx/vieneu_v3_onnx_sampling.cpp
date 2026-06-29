@@ -81,12 +81,74 @@ int64_t VieneuV3OnnxEngine::sample_logits(
     
     const size_t N = logits.size();
     if (top_k > 0 && static_cast<size_t>(top_k) < N) {
-        sampling_tmp_ = logits;
-        std::nth_element(sampling_tmp_.begin(), sampling_tmp_.end() - top_k, sampling_tmp_.end());
-        const float kth = *(sampling_tmp_.end() - top_k);
-        for (float& v : logits) {
-            if (v < kth) v = -std::numeric_limits<float>::infinity();
+        sampling_pairs_.clear();
+        sampling_pairs_.reserve(N);
+        for (size_t i = 0; i < N; ++i) {
+            sampling_pairs_.push_back({logits[i], i});
         }
+
+        const size_t k = static_cast<size_t>(top_k);
+        const auto by_logit_desc = [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) {
+            return a.first > b.first;
+        };
+        std::nth_element(sampling_pairs_.begin(), sampling_pairs_.begin() + static_cast<std::ptrdiff_t>(k), sampling_pairs_.end(), by_logit_desc);
+        sampling_pairs_.resize(k);
+        std::sort(sampling_pairs_.begin(), sampling_pairs_.end(), by_logit_desc);
+
+        if (top_p > 0.0f && top_p < 1.0f && !sampling_pairs_.empty()) {
+            const float max_v = sampling_pairs_[0].first;
+            double sum = 0.0;
+            sampling_probs_.resize(sampling_pairs_.size());
+            for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+                const double e = std::exp(static_cast<double>(sampling_pairs_[i].first - max_v));
+                sampling_probs_[i] = static_cast<float>(e);
+                sum += e;
+            }
+            if (sum > 0.0 && std::isfinite(sum)) {
+                float cumulative_before = 0.0f;
+                size_t keep = 0;
+                for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+                    if (cumulative_before > top_p) {
+                        break;
+                    }
+                    cumulative_before += static_cast<float>(static_cast<double>(sampling_probs_[i]) / sum);
+                    ++keep;
+                }
+                sampling_pairs_.resize((std::max)(size_t{1}, keep));
+            }
+        }
+
+        if (sampling_pairs_.empty()) {
+            return 0;
+        }
+
+        const float max_v = sampling_pairs_[0].first;
+        double sum = 0.0;
+        sampling_probs_.resize(sampling_pairs_.size());
+        for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+            const double e = std::exp(static_cast<double>(sampling_pairs_[i].first - max_v));
+            sampling_probs_[i] = static_cast<float>(e);
+            sum += e;
+        }
+        if (sum <= 0.0 || !std::isfinite(sum)) {
+            const float uniform = 1.0f / static_cast<float>(sampling_pairs_.size());
+            std::fill(sampling_probs_.begin(), sampling_probs_.end(), uniform);
+        } else {
+            for (size_t i = 0; i < sampling_probs_.size(); ++i) {
+                sampling_probs_[i] = static_cast<float>(static_cast<double>(sampling_probs_[i]) / sum);
+            }
+        }
+
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        const float target = dist(rng_);
+        float cumulative = 0.0f;
+        for (size_t i = 0; i < sampling_pairs_.size(); ++i) {
+            cumulative += sampling_probs_[i];
+            if (target <= cumulative) {
+                return static_cast<int64_t>(sampling_pairs_[i].second);
+            }
+        }
+        return static_cast<int64_t>(sampling_pairs_.back().second);
     }
     if (top_p > 0.0f && top_p < 1.0f) {
         sampling_pairs_.clear();

@@ -4,6 +4,7 @@ project(vieneu-tts-project LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(CTest)
+find_package(OpenMP)
 
 # DLL/Output Directory setup (same as build root)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -81,11 +82,11 @@ set(VIENEU_V3_ONNX_SOURCES
     src/vieneu/v3_onnx/vieneu_v3_onnx_tokenizer.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_audio.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_inference.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_acoustic_native.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_sampling.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_voice.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_utils.cpp
 )
-
 # Core static library
 add_library(vieneu-tts-core STATIC
     src/backends/llama_backend.cpp
@@ -104,6 +105,9 @@ target_link_libraries(vieneu-tts-core PUBLIC
     llama
     ${ONNXRUNTIME_LIB}
 )
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(vieneu-tts-core PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 # Shared library for ABI consumers (vieneu-tts.dll)
 add_library(vieneu-tts SHARED

@@ -62,11 +62,10 @@ private:
 bool VieneuV3OnnxEngine::initialize_acoustic_executor(std::string& error) {
     const std::string backend = acoustic_backend_from_env();
     if (backend == "ggml") {
-        error = "VIENEU_ACOUSTIC_BACKEND=ggml was requested, but the ggml acoustic executor is not implemented yet.";
-        return false;
+        return initialize_native_acoustic_executor(error);
     }
     if (backend != "onnx") {
-        error = "Unsupported VIENEU_ACOUSTIC_BACKEND value: " + backend + " (supported: onnx).";
+        error = "Unsupported VIENEU_ACOUSTIC_BACKEND value: " + backend + " (supported: onnx, ggml).";
         return false;
     }
     if (!acoustic_session_) {

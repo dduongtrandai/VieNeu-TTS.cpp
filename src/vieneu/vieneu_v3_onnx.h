@@ -19,7 +19,7 @@ struct VieneuV3OnnxInit {
     std::string config_path;
     std::string tokenizer_path;
     std::string voices_json_path;
-    int n_threads = 4;
+    int n_threads = 2;
 };
 
 struct VieneuV3OnnxParams {
@@ -72,6 +72,28 @@ private:
         int text_vocab_size = 419;
         int audio_vocab_size = 1024;
         int local_num_attention_heads = 8;
+        int local_num_hidden_layers = 2;
+        int local_intermediate_size = 2048;
+        float rms_norm_eps = 1e-6f;
+    };
+
+    struct AcousticLayerWeights {
+        std::vector<float> norm1;
+        std::vector<float> qkv;
+        std::vector<float> q_norm;
+        std::vector<float> k_norm;
+        std::vector<float> o_proj;
+        std::vector<float> norm2;
+        std::vector<float> ff_up;
+        std::vector<float> ff_gate;
+        std::vector<float> ff_down;
+    };
+
+    struct AcousticWeights {
+        std::vector<float> slot_pos_emb;
+        std::vector<float> final_norm;
+        std::vector<AcousticLayerWeights> layers;
+        bool loaded = false;
     };
 
     struct PromptRows {
@@ -136,6 +158,7 @@ private:
     };
 
     class OnnxAcousticExecutor;
+    class NativeAcousticExecutor;
 
     static std::string join_path(const std::string& dir, const std::string& name);
     static bool file_exists(const std::string& path);
@@ -147,6 +170,7 @@ private:
     bool load_voices(const std::string& voices_path, std::string& error);
     bool load_config(const std::string& path, std::string& error);
     bool load_heads_npz(const std::string& path, std::string& error);
+    bool load_acoustic_weights(const std::string& path, std::string& error);
     bool parse_voice_reserved_id(const std::string& voice_id, int& reserved_id) const;
     bool resolve_voice_preset(const std::string& voice_id, VoicePreset& preset, std::string& error) const;
     bool read_wav_file(const std::string& path, WavData& wav, std::string& error) const;
@@ -161,6 +185,7 @@ private:
                              std::vector<float>& out_audio,
                              std::string& error);
     bool initialize_acoustic_executor(std::string& error);
+    bool initialize_native_acoustic_executor(std::string& error);
     bool acoustic_frame(const std::vector<float>& h,
                         float temperature,
                         int top_k,
@@ -214,6 +239,7 @@ private:
     Tensor2D text_emb_t_;
     Tensor3D audio_emb_;
     Tensor3D audio_emb_t_;
+    AcousticWeights acoustic_weights_;
     ByteBpeTokenizer tokenizer_;
     std::string model_dir_;
     std::string onnx_dir_;

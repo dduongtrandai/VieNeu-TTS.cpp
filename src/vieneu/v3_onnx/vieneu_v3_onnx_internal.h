@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <array>
 #include "onnxruntime_cxx_api.h"
@@ -31,6 +32,7 @@ float half_to_float(uint16_t h);
 
 // File helpers
 std::string read_file_bytes(const std::string& path);
+std::unordered_map<std::string, NamedArray> load_npz_stored(const std::string& path);
 
 // ONNX utilities
 std::vector<int64_t> tensor_shape(const Ort::Value& value);
