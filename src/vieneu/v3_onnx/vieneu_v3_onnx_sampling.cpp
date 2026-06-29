@@ -11,7 +11,11 @@
 // --- Math Kernels ---
 
 void matvec_transposed(const float* vec, const float* matrix_hv, int64_t hidden, int64_t vocab, std::vector<float>& logits) {
-    logits.assign(static_cast<size_t>(vocab), 0.0f);
+    const size_t out_size = static_cast<size_t>(vocab);
+    if (logits.size() != out_size) {
+        logits.resize(out_size);
+    }
+    std::fill(logits.begin(), logits.end(), 0.0f);
     float* out = logits.data();
     for (int64_t h = 0; h < hidden; ++h) {
         const float scale = vec[h];
@@ -141,6 +145,14 @@ int64_t VieneuV3OnnxEngine::sample_logits(
             sampling_probs_[i] = static_cast<float>(static_cast<double>(sampling_probs_[i]) / sum);
         }
     }
-    std::discrete_distribution<int64_t> dist(sampling_probs_.begin(), sampling_probs_.end());
-    return dist(rng_);
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    const float target = dist(rng_);
+    float cumulative = 0.0f;
+    for (size_t i = 0; i < N; ++i) {
+        cumulative += sampling_probs_[i];
+        if (target <= cumulative) {
+            return static_cast<int64_t>(i);
+        }
+    }
+    return N == 0 ? 0 : static_cast<int64_t>(N - 1);
 }

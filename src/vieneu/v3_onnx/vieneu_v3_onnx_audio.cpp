@@ -142,7 +142,7 @@ bool VieneuV3OnnxEngine::encode_reference_audio(
             }
             cache_session_io(*codec_encode_session_, codec_encode_io_);
         }
-        auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::MemoryInfo& mem = cpu_memory_info();
         if (codec_encode_io_.input_names.size() != 2 || codec_encode_io_.output_names.empty()) {
             error = "MOSS codec encode ONNX signature mismatch: expected 2 inputs and at least 1 output.";
             return false;
@@ -224,7 +224,7 @@ bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_
         std::vector<int32_t> lengths = {static_cast<int32_t>(frame_count)};
         std::vector<int64_t> codes_shape = {1, frame_count, config_.n_vq};
         std::vector<int64_t> len_shape = {1};
-        auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::MemoryInfo& mem = cpu_memory_info();
         if (codec_decode_io_.input_names.size() != 2 || codec_decode_io_.output_names.empty()) {
             error = "MOSS codec decode ONNX signature mismatch: expected 2 inputs and at least 1 output.";
             return false;

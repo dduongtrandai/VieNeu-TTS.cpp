@@ -120,6 +120,23 @@ private:
         int64_t unk_id = 43;
     };
 
+    class AcousticExecutor {
+    public:
+        virtual ~AcousticExecutor() = default;
+        virtual const char* backend_name() const = 0;
+        virtual bool generate_frame(const std::vector<float>& h,
+                                    float temperature,
+                                    int top_k,
+                                    float top_p,
+                                    float repetition_penalty,
+                                    std::vector<std::unordered_set<int>>& history,
+                                    std::vector<int64_t>& codes,
+                                    bool& eos,
+                                    std::string& error) = 0;
+    };
+
+    class OnnxAcousticExecutor;
+
     static std::string join_path(const std::string& dir, const std::string& name);
     static bool file_exists(const std::string& path);
     static bool read_text_file(const std::string& path, std::string& out);
@@ -143,6 +160,7 @@ private:
                              const VieneuV3OnnxParams& params,
                              std::vector<float>& out_audio,
                              std::string& error);
+    bool initialize_acoustic_executor(std::string& error);
     bool acoustic_frame(const std::vector<float>& h,
                         float temperature,
                         int top_k,
@@ -152,6 +170,15 @@ private:
                         std::vector<int64_t>& codes,
                         bool& eos,
                         std::string& error);
+    bool acoustic_frame_onnx(const std::vector<float>& h,
+                             float temperature,
+                             int top_k,
+                             float top_p,
+                             float repetition_penalty,
+                             std::vector<std::unordered_set<int>>& history,
+                             std::vector<int64_t>& codes,
+                             bool& eos,
+                             std::string& error);
     int64_t sample_logits(std::vector<float>& logits,
                           float temperature,
                           int top_k,
@@ -162,6 +189,7 @@ private:
     std::string phonemize_for_v3(const std::string& text) const;
     void reset_benchmark_stats();
     void print_benchmark_stats() const;
+    Ort::MemoryInfo& cpu_memory_info();
 
     std::shared_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::SessionOptions> session_options_;
@@ -170,6 +198,8 @@ private:
     std::unique_ptr<Ort::Session> acoustic_session_;
     std::unique_ptr<Ort::Session> codec_decode_session_;
     std::unique_ptr<Ort::Session> codec_encode_session_;
+    std::unique_ptr<AcousticExecutor> acoustic_executor_;
+    std::unique_ptr<Ort::MemoryInfo> cpu_memory_info_;
     SessionIo prefill_io_;
     SessionIo decode_io_;
     SessionIo acoustic_io_;

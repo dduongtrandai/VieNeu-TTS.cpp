@@ -199,6 +199,8 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     acoustic_session_.reset();
     codec_decode_session_.reset();
     codec_encode_session_.reset();
+    acoustic_executor_.reset();
+    cpu_memory_info_.reset();
     session_options_.reset();
     prefill_io_ = SessionIo{};
     decode_io_ = SessionIo{};
@@ -258,6 +260,8 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     if (!append_requested_execution_provider(*session_options_, error)) {
         return false;
     }
+    cpu_memory_info_ = std::make_unique<Ort::MemoryInfo>(
+        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 
     if (env_enabled("VIENEU_ORT_PROFILING")) {
         std::string profile_prefix = getenv_string("VIENEU_ORT_PROFILE_PREFIX");
@@ -282,6 +286,9 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     cache_session_io(*decode_session_, decode_io_);
     cache_session_io(*acoustic_session_, acoustic_io_);
     cache_session_io(*codec_decode_session_, codec_decode_io_);
+    if (!initialize_acoustic_executor(error)) {
+        return false;
+    }
 
     if (!load_voices(init.voices_json_path, error)) {
         return false;
@@ -293,6 +300,14 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
 
 std::string VieneuV3OnnxEngine::phonemize_for_v3(const std::string& text) const {
     return VieneuProfile::phonemize(text);
+}
+
+Ort::MemoryInfo& VieneuV3OnnxEngine::cpu_memory_info() {
+    if (!cpu_memory_info_) {
+        cpu_memory_info_ = std::make_unique<Ort::MemoryInfo>(
+            Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+    }
+    return *cpu_memory_info_;
 }
 
 bool VieneuV3OnnxEngine::synthesize_phonemes(
@@ -307,7 +322,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
     const PromptRows rows = build_rows(phonemes, ref_codes, leading_token);
     std::vector<float> prompt_embeds = embed_rows(rows);
     std::vector<int64_t> prompt_shape = {1, rows.rows, config_.hidden_size};
-    auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::MemoryInfo& mem = cpu_memory_info();
 
     std::lock_guard<std::mutex> lock(run_mutex_);
     try {

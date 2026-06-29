@@ -4,12 +4,78 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 #include <vector>
 #include <stdexcept>
 
 // --- VieneuV3OnnxEngine Inference Member Functions ---
+
+namespace {
+
+std::string acoustic_backend_from_env() {
+    const char* value = std::getenv("VIENEU_ACOUSTIC_BACKEND");
+    std::string backend = value ? std::string(value) : std::string("onnx");
+    std::transform(backend.begin(), backend.end(), backend.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return backend;
+}
+
+} // namespace
+
+class VieneuV3OnnxEngine::OnnxAcousticExecutor final : public VieneuV3OnnxEngine::AcousticExecutor {
+public:
+    explicit OnnxAcousticExecutor(VieneuV3OnnxEngine& engine) : engine_(engine) {}
+
+    const char* backend_name() const override {
+        return "onnx";
+    }
+
+    bool generate_frame(const std::vector<float>& h,
+                        float temperature,
+                        int top_k,
+                        float top_p,
+                        float repetition_penalty,
+                        std::vector<std::unordered_set<int>>& history,
+                        std::vector<int64_t>& codes,
+                        bool& eos,
+                        std::string& error) override {
+        return engine_.acoustic_frame_onnx(
+            h,
+            temperature,
+            top_k,
+            top_p,
+            repetition_penalty,
+            history,
+            codes,
+            eos,
+            error);
+    }
+
+private:
+    VieneuV3OnnxEngine& engine_;
+};
+
+bool VieneuV3OnnxEngine::initialize_acoustic_executor(std::string& error) {
+    const std::string backend = acoustic_backend_from_env();
+    if (backend == "ggml") {
+        error = "VIENEU_ACOUSTIC_BACKEND=ggml was requested, but the ggml acoustic executor is not implemented yet.";
+        return false;
+    }
+    if (backend != "onnx") {
+        error = "Unsupported VIENEU_ACOUSTIC_BACKEND value: " + backend + " (supported: onnx).";
+        return false;
+    }
+    if (!acoustic_session_) {
+        error = "VieNeu v3 acoustic ONNX session is not initialized.";
+        return false;
+    }
+    acoustic_executor_ = std::make_unique<OnnxAcousticExecutor>(*this);
+    return true;
+}
 
 VieneuV3OnnxEngine::PromptRows VieneuV3OnnxEngine::build_rows(
     const std::string& phonemes,
@@ -76,6 +142,32 @@ bool VieneuV3OnnxEngine::acoustic_frame(
     std::vector<int64_t>& codes,
     bool& eos,
     std::string& error) {
+    if (!acoustic_executor_) {
+        error = "VieNeu v3 acoustic executor is not initialized.";
+        return false;
+    }
+    return acoustic_executor_->generate_frame(
+        h,
+        temperature,
+        top_k,
+        top_p,
+        repetition_penalty,
+        history,
+        codes,
+        eos,
+        error);
+}
+
+bool VieneuV3OnnxEngine::acoustic_frame_onnx(
+    const std::vector<float>& h,
+    float temperature,
+    int top_k,
+    float top_p,
+    float repetition_penalty,
+    std::vector<std::unordered_set<int>>& history,
+    std::vector<int64_t>& codes,
+    bool& eos,
+    std::string& error) {
     const auto frame_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     try {
         const int H = config_.hidden_size;
@@ -91,7 +183,7 @@ bool VieneuV3OnnxEngine::acoustic_frame(
         std::array<int64_t, 3> token_shape = {1, 2, H};
         std::array<int64_t, 2> pos_shape = {1, 2};
 
-        auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::MemoryInfo& mem = cpu_memory_info();
         if (acoustic_io_.input_names.size() != 6 || acoustic_io_.output_names.size() != 5) {
             error = "VieNeu v3 acoustic ONNX signature mismatch: expected 6 inputs and 5 outputs.";
             return false;
