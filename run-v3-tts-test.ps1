@@ -10,6 +10,10 @@ param(
     [int]$MaxChars = 384,
     [int]$Threads = 4,
     [string]$AssetRoot = ".models\vieneu-v3-turbo",
+    [ValidateSet("cpu", "directml", "openvino")]
+    [string]$OnnxRuntimeFlavor = "cpu",
+    [string]$OnnxRuntimeVersion = "1.24.4",
+    [string]$OpenVINOOnnxRuntimeVersion = "1.24.1",
     [switch]$SkipDownload,
     [switch]$NoBuild
 )
@@ -20,7 +24,14 @@ $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $RepoRoot = $PSScriptRoot
-$OrtRoot = Join-Path $RepoRoot "ort_sdk\onnxruntime-win-x64-1.24.4"
+$OrtSdkDir = Join-Path $RepoRoot "ort_sdk"
+if ($OnnxRuntimeFlavor -eq "cpu") {
+    $OrtRoot = Join-Path $OrtSdkDir "onnxruntime-win-x64-$OnnxRuntimeVersion"
+} elseif ($OnnxRuntimeFlavor -eq "directml") {
+    $OrtRoot = Join-Path $OrtSdkDir "Microsoft.ML.OnnxRuntime.DirectML-$OnnxRuntimeVersion"
+} else {
+    $OrtRoot = Join-Path $OrtSdkDir "Intel.ML.OnnxRuntime.OpenVino-$OpenVINOOnnxRuntimeVersion"
+}
 $LlamaDir = Join-Path $RepoRoot "llama.cpp"
 $ModelDir = Join-Path $RepoRoot $AssetRoot
 $OnnxDir = Join-Path $ModelDir "onnx"
@@ -228,8 +239,12 @@ function Ensure-Built {
         throw "CLI is missing and -NoBuild was set: $CliExe"
     }
 
-    if (!(Test-Path (Join-Path $OrtRoot "include\onnxruntime_c_api.h"))) {
-        throw "ONNX Runtime SDK was not found at $OrtRoot. Run .\build-local.ps1 once, or place the SDK there."
+    $ortHeaderCandidates = @(
+        (Join-Path $OrtRoot "include\onnxruntime_c_api.h"),
+        (Join-Path $OrtRoot "build\native\include\onnxruntime_c_api.h")
+    )
+    if (!(($ortHeaderCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1))) {
+        throw "ONNX Runtime $OnnxRuntimeFlavor SDK was not found at $OrtRoot. Run .\build-local.ps1 -OnnxRuntimeFlavor $OnnxRuntimeFlavor once, or place the SDK there."
     }
     if (!(Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
         throw "llama.cpp was not found at $LlamaDir. Run .\build-local.ps1 once, or clone llama.cpp there."
@@ -276,14 +291,14 @@ function Ensure-RuntimeDlls {
     # Copy ONNX Runtime DLLs
     $ortLibCandidates = @(
         (Join-Path $OrtRoot "lib"),
-        (Join-Path $OrtRoot "bin")
+        (Join-Path $OrtRoot "bin"),
+        (Join-Path $OrtRoot "runtimes\win-x64\native")
     )
     foreach ($ortLib in $ortLibCandidates) {
         if (Test-Path $ortLib) {
-            foreach ($name in @("onnxruntime.dll", "onnxruntime_providers_shared.dll")) {
-                $src = Join-Path $ortLib $name
-                if (Test-Path $src) {
-                    Copy-Item -LiteralPath $src -Destination $ExeDir -Force
+            foreach ($pattern in @("onnxruntime.dll", "onnxruntime_providers*.dll", "DirectML.dll", "openvino*.dll", "tbb*.dll")) {
+                Get-ChildItem -LiteralPath $ortLib -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+                    Copy-Item -LiteralPath $_.FullName -Destination $ExeDir -Force
                 }
             }
         }

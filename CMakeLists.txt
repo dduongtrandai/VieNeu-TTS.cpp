@@ -44,11 +44,33 @@ add_subdirectory(${VIENEU_LLAMA_DIR} llama_cpp_build EXCLUDE_FROM_ALL)
 
 # Find ONNX Runtime dependency
 unset(ONNXRUNTIME_LIB CACHE)
+unset(ONNXRUNTIME_INCLUDE_DIR CACHE)
 if(ONNXRUNTIME_ROOT)
-    include_directories(SYSTEM "${ONNXRUNTIME_ROOT}/include")
-    link_directories("${ONNXRUNTIME_ROOT}/lib")
-    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+    set(ONNXRUNTIME_INCLUDE_CANDIDATES
+        "${ONNXRUNTIME_ROOT}/include"
+        "${ONNXRUNTIME_ROOT}/build/native/include"
+    )
+    set(ONNXRUNTIME_LIB_CANDIDATES
+        "${ONNXRUNTIME_ROOT}/lib"
+        "${ONNXRUNTIME_ROOT}/bin"
+        "${ONNXRUNTIME_ROOT}/runtimes/win-x64/native"
+        "${ONNXRUNTIME_ROOT}"
+    )
+    find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime_c_api.h
+        PATHS ${ONNXRUNTIME_INCLUDE_CANDIDATES}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    find_library(ONNXRUNTIME_LIB
+        NAMES onnxruntime
+        PATHS ${ONNXRUNTIME_LIB_CANDIDATES}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    include_directories(SYSTEM "${ONNXRUNTIME_INCLUDE_DIR}")
     message(STATUS "ONNX Runtime library found at: ${ONNXRUNTIME_LIB}")
+    message(STATUS "ONNX Runtime headers found at: ${ONNXRUNTIME_INCLUDE_DIR}")
 else()
     find_library(ONNXRUNTIME_LIB NAMES onnxruntime REQUIRED)
 endif()

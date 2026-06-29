@@ -18,6 +18,13 @@
 #include <vector>
 #include <thread>
 
+#if defined(_WIN32) && defined(__has_include)
+#if __has_include("dml_provider_factory.h")
+#include "dml_provider_factory.h"
+#define VIENEU_HAS_ORT_DIRECTML 1
+#endif
+#endif
+
 namespace {
 
 std::string getenv_string(const char* name) {
@@ -49,6 +56,56 @@ int env_int(const char* name, int fallback) {
     }
 }
 
+GraphOptimizationLevel env_graph_optimization_level(GraphOptimizationLevel fallback) {
+    const std::string value = lowercase(getenv_string("VIENEU_ORT_GRAPH_OPT_LEVEL"));
+    if (value.empty()) {
+        return fallback;
+    }
+    if (value == "disable" || value == "disabled" || value == "off" || value == "0") {
+        return GraphOptimizationLevel::ORT_DISABLE_ALL;
+    }
+    if (value == "basic" || value == "1") {
+        return GraphOptimizationLevel::ORT_ENABLE_BASIC;
+    }
+    if (value == "extended" || value == "2") {
+        return GraphOptimizationLevel::ORT_ENABLE_EXTENDED;
+    }
+    if (value == "all" || value == "3") {
+        return GraphOptimizationLevel::ORT_ENABLE_ALL;
+    }
+    return fallback;
+}
+
+void append_openvino_execution_provider(Ort::SessionOptions& options, const std::string& device_type) {
+    std::unordered_map<std::string, std::string> ov_options = {{"device_type", device_type}};
+    const int num_threads = env_int("VIENEU_ORT_OPENVINO_NUM_THREADS", 0);
+    if (num_threads > 0) {
+        ov_options["num_of_threads"] = std::to_string(num_threads);
+    }
+    const int num_streams = env_int("VIENEU_ORT_OPENVINO_NUM_STREAMS", 0);
+    if (num_streams > 0) {
+        ov_options["num_streams"] = std::to_string(num_streams);
+    }
+    const std::string cache_dir = getenv_string("VIENEU_ORT_OPENVINO_CACHE_DIR");
+    if (!cache_dir.empty()) {
+        ov_options["cache_dir"] = cache_dir;
+    }
+    if (env_enabled("VIENEU_ORT_OPENVINO_DISABLE_DYNAMIC_SHAPES")) {
+        ov_options["disable_dynamic_shapes"] = "true";
+    }
+    options.AppendExecutionProvider_OpenVINO_V2(ov_options);
+}
+
+void append_directml_execution_provider(Ort::SessionOptions& options, int device_id) {
+#if defined(VIENEU_HAS_ORT_DIRECTML)
+    Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_DML(options, (std::max)(0, device_id)));
+#else
+    (void)options;
+    (void)device_id;
+    throw std::runtime_error("DirectML EP is not available in this ONNX Runtime SDK/build.");
+#endif
+}
+
 bool append_requested_execution_provider(Ort::SessionOptions& options, std::string& error) {
     const std::string requested = lowercase(getenv_string("VIENEU_ORT_EP"));
     if (requested.empty() || requested == "cpu") {
@@ -64,7 +121,32 @@ bool append_requested_execution_provider(Ort::SessionOptions& options, std::stri
             return true;
         }
 
-        error = "Unsupported VIENEU_ORT_EP value: " + requested + " (supported: cpu, cuda).";
+        if (requested == "openvino_cpu" || requested == "ov_cpu") {
+            append_openvino_execution_provider(options, "CPU");
+            return true;
+        }
+
+        if (requested == "openvino_gpu" || requested == "ov_gpu") {
+            append_openvino_execution_provider(options, "GPU");
+            return true;
+        }
+
+        if (requested == "openvino" || requested == "ov") {
+            std::string device_type = getenv_string("VIENEU_ORT_OPENVINO_DEVICE_TYPE");
+            if (device_type.empty()) {
+                device_type = "CPU";
+            }
+            append_openvino_execution_provider(options, device_type);
+            return true;
+        }
+
+        if (requested == "directml" || requested == "dml") {
+            const int device_id = env_int("VIENEU_ORT_DIRECTML_DEVICE_ID", env_int("VIENEU_ORT_DML_DEVICE_ID", 0));
+            append_directml_execution_provider(options, device_id);
+            return true;
+        }
+
+        error = "Unsupported VIENEU_ORT_EP value: " + requested + " (supported: cpu, cuda, openvino_cpu, openvino_gpu, directml).";
         return false;
     } catch (const std::exception& e) {
         if (env_enabled("VIENEU_ORT_EP_REQUIRED")) {
@@ -155,7 +237,7 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     int threads_to_use = env_int("VIENEU_ORT_THREADS", init.n_threads);
     if (threads_to_use <= 0) {
         unsigned int hardware_threads = std::thread::hardware_concurrency();
-        threads_to_use = hardware_threads > 0 ? std::max(1, static_cast<int>(std::min(hardware_threads / 2, 4u))) : 4;
+        threads_to_use = hardware_threads > 0 ? (std::max)(1, static_cast<int>((std::min)(hardware_threads / 2, 4u))) : 4;
     }
     session_options_->SetIntraOpNumThreads(threads_to_use);
     const int inter_op_threads = env_int("VIENEU_ORT_INTER_OP_THREADS", 1);
@@ -166,7 +248,7 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
     } else {
         session_options_->SetExecutionMode(ORT_SEQUENTIAL);
     }
-    session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_options_->SetGraphOptimizationLevel(env_graph_optimization_level(GraphOptimizationLevel::ORT_ENABLE_ALL));
     session_options_->EnableCpuMemArena();
     if (env_enabled("VIENEU_ORT_DISABLE_SPIN")) {
         session_options_->AddConfigEntry("session.intra_op.allow_spinning", "0");
