@@ -14,6 +14,7 @@ param (
     [string]$OpenVINOOnnxRuntimeVersion = "1.24.1",
     [switch]$Clean,
     [switch]$NoPackage,
+    [switch]$PortableCpu,
     [string]$LlamaCppRepo = "https://github.com/ggml-org/llama.cpp.git",
     [string]$Generator = "Ninja"
 )
@@ -164,6 +165,7 @@ $cmakeArgs = @(
     "-S", ".",
     "-G", $Generator,
     "-DCMAKE_BUILD_TYPE=Release",
+    "-DVIENEU_PORTABLE_CPU=$($PortableCpu.IsPresent)",
     "-DVIENEU_LLAMA_DIR=llama.cpp",
     "-DONNXRUNTIME_ROOT=$OrtRoot"
 )

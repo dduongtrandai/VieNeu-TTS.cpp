@@ -19,9 +19,11 @@ public:
 
     V3PromptRows build_rows(const std::string& phonemes, const std::vector<int64_t>* ref_codes, int leading_token) const;
     std::vector<float> embed_rows(const V3PromptRows& rows) const;
+    void embed_rows_into(const V3PromptRows& rows, std::vector<float>& embeds) const;
     
     // Embed a single slot/frame of generated audio codes to pass back to the backbone
     std::vector<float> embed_slot(const std::vector<int64_t>& codes) const;
+    void embed_slot_into(const std::vector<int64_t>& codes, std::vector<float>& embeds) const;
 
 private:
     V3NativeConfig config_;

@@ -20,10 +20,6 @@ from gguf import GGUFWriter
 
 
 def export_backbone_gguf(safetensors_path: Path, output_path: Path):
-def export_heads_npz(safetensors_path: Path, output_path: Path):
-    print(f"Exporting embedding heads from {safetensors_path}...")
-def export_heads_npz(safetensors_path: Path, output_path: Path):
-    print(f"Exporting embedding heads from {safetensors_path}...")
     sd = {k: v.float() for k, v in safetensors.torch.load_file(str(safetensors_path)).items()}
 
     print("Mapping semantic backbone tensors to GGUF...")
@@ -99,10 +95,6 @@ def export_heads_npz(safetensors_path: Path, output_path: Path):
     print("Backbone GGUF export complete.")
 
 
-def export_heads_npz(safetensors_path: Path, output_path: Path):
-    print(f"Exporting embedding heads from {safetensors_path}...")
-def export_heads_npz(safetensors_path: Path, output_path: Path):
-    print(f"Exporting embedding heads from {safetensors_path}...")
 def export_heads_npz(safetensors_path: Path, output_path: Path):
     print(f"Exporting embedding heads from {safetensors_path}...")
     sd = {k: v.float() for k, v in safetensors.torch.load_file(str(safetensors_path)).items()}

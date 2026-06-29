@@ -19,6 +19,7 @@ endif()
 # Configuration Options
 set(VIENEU_LLAMA_DIR "../llama.cpp" CACHE PATH "Path to llama.cpp source directory")
 set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to ONNX Runtime SDK root")
+option(VIENEU_PORTABLE_CPU "Build portable CPU kernels instead of host-native SIMD kernels" OFF)
 
 # Fallback environment check for ONNX Runtime
 if(NOT ONNXRUNTIME_ROOT AND DEFINED ENV{ONNXRUNTIME_ROOT})
@@ -33,7 +34,13 @@ if(NOT EXISTS "${VIENEU_LLAMA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "llama.cpp CMakeLists.txt not found at ${VIENEU_LLAMA_DIR}")
 endif()
 
-set(GGML_NATIVE OFF CACHE BOOL "Build portable CPU kernels instead of host-native kernels" FORCE)
+if(VIENEU_PORTABLE_CPU)
+    set(GGML_NATIVE OFF CACHE BOOL "Build host-native ggml CPU kernels" FORCE)
+else()
+    set(GGML_NATIVE ON CACHE BOOL "Build host-native ggml CPU kernels" FORCE)
+endif()
+message(STATUS "VieNeu portable CPU build: ${VIENEU_PORTABLE_CPU}")
+message(STATUS "GGML native CPU kernels: ${GGML_NATIVE}")
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Do not build llama.cpp tests" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "Do not build llama.cpp tools" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Do not build llama.cpp examples" FORCE)

@@ -249,6 +249,30 @@ static std::string join_paths(const std::string& a, const std::string& b) {
 #endif
 }
 
+static std::vector<float> transpose_2d_local(const std::vector<float>& src, int64_t rows, int64_t cols) {
+    std::vector<float> dst(static_cast<size_t>(rows * cols));
+    for (int64_t r = 0; r < rows; ++r) {
+        const float* row = src.data() + r * cols;
+        for (int64_t c = 0; c < cols; ++c) {
+            dst[static_cast<size_t>(c * rows + r)] = row[c];
+        }
+    }
+    return dst;
+}
+
+static std::vector<float> transpose_audio_emb_local(const std::vector<float>& src, int64_t channels, int64_t vocab, int64_t hidden) {
+    std::vector<float> dst(static_cast<size_t>(channels * hidden * vocab));
+    for (int64_t ch = 0; ch < channels; ++ch) {
+        for (int64_t v = 0; v < vocab; ++v) {
+            const float* emb = src.data() + (ch * vocab + v) * hidden;
+            for (int64_t h = 0; h < hidden; ++h) {
+                dst[static_cast<size_t>((ch * hidden + h) * vocab + v)] = emb[h];
+            }
+        }
+    }
+    return dst;
+}
+
 bool V3NativeAssets::load(const std::string& model_dir, std::string& error) {
     if (!load_config(join_paths(model_dir, "config.json"), error)) return false;
     if (!load_heads(join_paths(model_dir, "vieneu_v3_heads.npz"), error)) return false;
@@ -306,8 +330,25 @@ bool V3NativeAssets::load_heads(const std::string& path, std::string& error) {
             return false;
         }
 
-        text_emb_ = text_it->second.data;
-        audio_emb_ = audio_it->second.data;
+        const auto& text = text_it->second;
+        const auto& audio = audio_it->second;
+        if (text.shape.size() != 2 || audio.shape.size() != 3) {
+            error = "Unexpected embedding rank in vieneu_v3_heads.npz";
+            return false;
+        }
+        if (text.shape[0] != config_.text_vocab_size ||
+            text.shape[1] != config_.hidden_size ||
+            audio.shape[0] != config_.n_vq ||
+            audio.shape[1] != config_.audio_vocab_size ||
+            audio.shape[2] != config_.hidden_size) {
+            error = "Embedding shapes in vieneu_v3_heads.npz do not match config.json";
+            return false;
+        }
+
+        text_emb_ = text.data;
+        audio_emb_ = audio.data;
+        text_emb_t_ = transpose_2d_local(text_emb_, config_.text_vocab_size, config_.hidden_size);
+        audio_emb_t_ = transpose_audio_emb_local(audio_emb_, config_.n_vq, config_.audio_vocab_size, config_.hidden_size);
         return true;
     } catch (const std::exception& e) {
         error = std::string("Failed to load vieneu_v3_heads.npz: ") + e.what();

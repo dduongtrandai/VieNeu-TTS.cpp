@@ -39,6 +39,8 @@ public:
     const V3NativeConfig& config() const { return config_; }
     const std::vector<float>& text_emb() const { return text_emb_; }
     const std::vector<float>& audio_emb() const { return audio_emb_; }
+    const std::vector<float>& text_emb_t() const { return text_emb_t_; }
+    const std::vector<float>& audio_emb_t() const { return audio_emb_t_; }
     const V3AcousticWeights& acoustic_weights() const { return acoustic_weights_; }
     const std::string& voices_json() const { return voices_json_; }
 
@@ -54,6 +56,8 @@ private:
     V3NativeConfig config_;
     std::vector<float> text_emb_;
     std::vector<float> audio_emb_; // Packed as [16 * 1024 * 768] (channels, vocab, hidden)
+    std::vector<float> text_emb_t_; // Packed as [hidden, text_vocab]
+    std::vector<float> audio_emb_t_; // Packed as [n_vq, hidden, audio_vocab]
     V3AcousticWeights acoustic_weights_;
     std::string voices_json_;
 };

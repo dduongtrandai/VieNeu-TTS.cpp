@@ -4,24 +4,55 @@
 #include <limits>
 #include <numeric>
 
-void matvec_native(const float* vec, const float* matrix, int64_t hidden, int64_t vocab, std::vector<float>& logits) {
+namespace {
+
+void collect_top_k_pairs(const std::vector<float>& logits, size_t k, std::vector<std::pair<float, size_t>>& out) {
+    out.clear();
+    out.reserve(k);
+    const auto by_logit_min_heap = [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) {
+        return a.first > b.first;
+    };
+    for (size_t i = 0; i < logits.size(); ++i) {
+        const float value = logits[i];
+        if (out.size() < k) {
+            out.push_back({value, i});
+            std::push_heap(out.begin(), out.end(), by_logit_min_heap);
+            continue;
+        }
+        if (!out.empty() && value > out.front().first) {
+            std::pop_heap(out.begin(), out.end(), by_logit_min_heap);
+            out.back() = {value, i};
+            std::push_heap(out.begin(), out.end(), by_logit_min_heap);
+        }
+    }
+    std::sort(
+        out.begin(),
+        out.end(),
+        [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) {
+            return a.first > b.first;
+        });
+}
+
+} // namespace
+
+void matvec_transposed_native(const float* vec, const float* matrix_hv, int64_t hidden, int64_t vocab, std::vector<float>& logits) {
     const size_t out_size = static_cast<size_t>(vocab);
     if (logits.size() != out_size) {
         logits.resize(out_size);
     }
+    std::fill(logits.begin(), logits.end(), 0.0f);
     float* out = logits.data();
-    for (int64_t v = 0; v < vocab; ++v) {
-        float sum = 0.0f;
-        const float* row = matrix + v * hidden;
+    for (int64_t h = 0; h < hidden; ++h) {
+        const float scale = vec[h];
+        const float* row = matrix_hv + h * vocab;
 #if defined(_MSC_VER)
 #pragma loop(ivdep)
 #elif defined(__GNUC__) || defined(__clang__)
 #pragma GCC ivdep
 #endif
-        for (int64_t h = 0; h < hidden; ++h) {
-            sum += vec[h] * row[h];
+        for (int64_t v = 0; v < vocab; ++v) {
+            out[v] += scale * row[v];
         }
-        out[v] = sum;
     }
 }
 
@@ -33,10 +64,10 @@ int64_t V3NativeSampler::sample_logits(
     int top_k,
     float top_p,
     float repetition_penalty,
-    const std::unordered_set<int>* previous) {
+    const V3RepetitionHistory* previous) {
     
     if (previous && std::fabs(repetition_penalty - 1.0f) > 1e-6f) {
-        for (int idx : *previous) {
+        for (int32_t idx : previous->indices) {
             if (idx >= 0 && static_cast<size_t>(idx) < logits.size()) {
                 logits[static_cast<size_t>(idx)] = logits[static_cast<size_t>(idx)] < 0.0f
                     ? logits[static_cast<size_t>(idx)] * repetition_penalty
@@ -55,19 +86,8 @@ int64_t V3NativeSampler::sample_logits(
     
     const size_t N = logits.size();
     if (top_k > 0 && static_cast<size_t>(top_k) < N) {
-        sampling_pairs_.clear();
-        sampling_pairs_.reserve(N);
-        for (size_t i = 0; i < N; ++i) {
-            sampling_pairs_.push_back({logits[i], i});
-        }
-
         const size_t k = static_cast<size_t>(top_k);
-        const auto by_logit_desc = [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) {
-            return a.first > b.first;
-        };
-        std::nth_element(sampling_pairs_.begin(), sampling_pairs_.begin() + static_cast<std::ptrdiff_t>(k), sampling_pairs_.end(), by_logit_desc);
-        sampling_pairs_.resize(k);
-        std::sort(sampling_pairs_.begin(), sampling_pairs_.end(), by_logit_desc);
+        collect_top_k_pairs(logits, k, sampling_pairs_);
 
         if (top_p > 0.0f && top_p < 1.0f && !sampling_pairs_.empty()) {
             const float max_v = sampling_pairs_[0].first;

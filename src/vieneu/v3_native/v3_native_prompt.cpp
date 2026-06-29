@@ -195,6 +195,13 @@ V3PromptRows V3NativePrompt::build_rows(
 
 std::vector<float> V3NativePrompt::embed_rows(const V3PromptRows& rows) const {
     std::vector<float> embeds(static_cast<size_t>(rows.rows * config_.hidden_size), 0.0f);
+    embed_rows_into(rows, embeds);
+    return embeds;
+}
+
+void V3NativePrompt::embed_rows_into(const V3PromptRows& rows, std::vector<float>& embeds) const {
+    embeds.resize(static_cast<size_t>(rows.rows * config_.hidden_size));
+    std::fill(embeds.begin(), embeds.end(), 0.0f);
     const auto& text_emb = assets_.text_emb();
     const auto& audio_emb = assets_.audio_emb();
     const int H = config_.hidden_size;
@@ -217,29 +224,19 @@ std::vector<float> V3NativePrompt::embed_rows(const V3PromptRows& rows) const {
             }
         }
     }
-    return embeds;
 }
 
 std::vector<float> V3NativePrompt::embed_slot(const std::vector<int64_t>& codes) const {
-    // A single slot embedding for generated audio codes has 1 row
-    std::vector<float> embeds(static_cast<size_t>(config_.hidden_size), 0.0f);
+    std::vector<float> embeds;
+    embed_slot_into(codes, embeds);
+    return embeds;
+}
+
+void V3NativePrompt::embed_slot_into(const std::vector<int64_t>& codes, std::vector<float>& embeds) const {
+    embeds.resize(static_cast<size_t>(config_.hidden_size));
+    std::fill(embeds.begin(), embeds.end(), 0.0f);
     const auto& audio_emb = assets_.audio_emb();
     const int H = config_.hidden_size;
-
-    // Slot token for decoding step (col 0 text ID is pad/ignored, but we can look it up or keep as 0)
-    // Wait, in model.py's _build_inputs_embeds:
-    // embeds = self.text_embeddings(input_ids[:, :, 0])
-    // So col 0 is text_embeddings(input_ids[:, :, 0]).
-    // For decode steps, input_ids[:, :, 0] is config.audio_pad_token_id (or some other padding token id)?
-    // Wait! Let's check: in PyTorch/ONNX runtime, during decoding:
-    // input_ids has text token at col 0 as config.audio_pad_token_id (which is 1024), which is out of text vocab size (389).
-    // In modeling_v3_turbo.py line 168:
-    // audio_emb = self.audio_embeddings[ch](safe_ids) * valid_mask.unsqueeze(-1)
-    // So the text token is just embedded. If it's out of range, we do nothing or treat as 0.
-    // In our ONNX engine code, let's see how `embed_rows` maps out-of-range text_id:
-    // if (text_id >= 0 && text_id < text_emb_.rows) { ... }
-    // So indeed it skips it if out of range.
-    // So for embed_slot, text embedding is 0, and we just sum the audio embeddings of the codes.
     for (int ch = 0; ch < config_.n_vq; ++ch) {
         const int64_t id = codes[static_cast<size_t>(ch)];
         if (id == config_.audio_pad_token_id || id < 0 || id >= config_.audio_vocab_size) {
@@ -250,5 +247,4 @@ std::vector<float> V3NativePrompt::embed_slot(const std::vector<int64_t>& codes)
             embeds[h] += src[h];
         }
     }
-    return embeds;
 }

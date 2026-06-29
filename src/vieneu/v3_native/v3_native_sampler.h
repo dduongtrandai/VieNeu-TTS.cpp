@@ -2,8 +2,9 @@
 #define V3_NATIVE_SAMPLER_H
 
 #include <vector>
-#include <unordered_set>
 #include <random>
+
+#include "../v3_common/v3_repetition_history.h"
 
 class V3NativeSampler {
 public:
@@ -15,7 +16,7 @@ public:
         int top_k,
         float top_p,
         float repetition_penalty,
-        const std::unordered_set<int>* previous);
+        const V3RepetitionHistory* previous);
 
 private:
     std::mt19937 rng_;
@@ -25,6 +26,6 @@ private:
     std::vector<float> sampling_probs_;
 };
 
-void matvec_native(const float* vec, const float* matrix, int64_t hidden, int64_t vocab, std::vector<float>& logits);
+void matvec_transposed_native(const float* vec, const float* matrix_hv, int64_t hidden, int64_t vocab, std::vector<float>& logits);
 
 #endif // V3_NATIVE_SAMPLER_H

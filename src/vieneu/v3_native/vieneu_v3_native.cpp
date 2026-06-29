@@ -4,6 +4,8 @@
 #include <fstream>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
+#include <cctype>
 #include <algorithm>
 #include <stdexcept>
 #include <chrono>
@@ -26,6 +28,31 @@ static std::string join_paths(const std::string& a, const std::string& b) {
 #endif
 }
 
+static bool env_flag_enabled_local(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return false;
+    }
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+static int effective_chunk_chars_for_frame_budget(int requested_max_chars, int max_new_frames) {
+    const int max_chars = (std::max)(16, requested_max_chars);
+    if (max_new_frames <= 0) {
+        return max_chars;
+    }
+
+    // max_new_frames is applied per chunk. If a long text chunk is allowed to be
+    // much larger than the frame budget, generation can hit the frame cap before
+    // EOS and the resulting audio sounds like it skipped the tail of the text.
+    const int frame_limited_chars = (std::max)(64, max_new_frames);
+    return (std::min)(max_chars, frame_limited_chars);
+}
+
 VieneuV3NativeEngine::VieneuV3NativeEngine() {}
 
 VieneuV3NativeEngine::~VieneuV3NativeEngine() {}
@@ -44,7 +71,7 @@ bool VieneuV3NativeEngine::initialize(const VieneuV3NativeInit& init, std::strin
         }
 
         prompt_builder_ = std::make_unique<V3NativePrompt>(config_, tokenizer_, assets_);
-        acoustic_ = std::make_unique<V3NativeAcoustic>(config_, assets_, sampler_);
+        acoustic_ = std::make_unique<V3NativeAcoustic>(config_, assets_, sampler_, init.n_threads);
 
         if (!acoustic_->initialize(error)) {
             return false;
@@ -52,10 +79,14 @@ bool VieneuV3NativeEngine::initialize(const VieneuV3NativeInit& init, std::strin
 
         // Initialize llama backbone
         V3BackboneParams backbone_params;
-        backbone_params.model_path = join_paths(init.onnx_dir.empty() ? init.model_dir : init.onnx_dir, "backbone.gguf");
+        backbone_params.model_path = join_paths(init.model_dir, "backbone.gguf");
+        if (!file_exists_local(backbone_params.model_path) && !init.onnx_dir.empty()) {
+            backbone_params.model_path = join_paths(init.onnx_dir, "backbone.gguf");
+        }
         backbone_params.n_threads = init.n_threads;
+        backbone_params.n_threads_batch = init.n_threads;
         if (!backbone_.initialize(backbone_params)) {
-            error = "Failed to initialize llama.cpp Qwen3 backbone model.";
+            error = "Failed to initialize llama.cpp Qwen3 backbone model: " + backbone_params.model_path;
             return false;
         }
 
@@ -109,8 +140,10 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
         return false;
     }
 
-    // Chunk text
-    const std::vector<std::string> chunks = chunk_text_v3(params.text, params.max_chars);
+    // Chunk text. Keep chunk size in sympathy with the per-chunk frame budget so
+    // explicit low --max-new-frames values do not silently truncate long chunks.
+    const int effective_max_chars = effective_chunk_chars_for_frame_budget(params.max_chars, params.max_new_frames);
+    const std::vector<std::string> chunks = chunk_text_v3(params.text, effective_max_chars);
     if (chunks.empty()) {
         error = "Text chunking produced no text chunks.";
         return false;
@@ -143,6 +176,7 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
         leading_token = reserved_id;
     }
 
+    const int silence_samples = static_cast<int>(std::lround(static_cast<double>(sample_rate()) * 0.15));
     for (size_t i = 0; i < chunks.size(); ++i) {
         const std::string phonemes = phonemize_for_v3(chunks[i]);
         std::vector<float> chunk_audio;
@@ -151,6 +185,12 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
                 error += " (chunk " + std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + ")";
             }
             return false;
+        }
+        if (chunk_audio.empty()) {
+            continue;
+        }
+        if (!out_audio.empty() && silence_samples > 0) {
+            out_audio.insert(out_audio.end(), static_cast<size_t>(silence_samples), 0.0f);
         }
         out_audio.insert(out_audio.end(), chunk_audio.begin(), chunk_audio.end());
     }
@@ -169,22 +209,29 @@ bool VieneuV3NativeEngine::synthesize_phonemes(
     out_audio.clear();
 
     const V3PromptRows rows = prompt_builder_->build_rows(phonemes, ref_codes, leading_token);
-    std::vector<float> prompt_embeds = prompt_builder_->embed_rows(rows);
+    prompt_builder_->embed_rows_into(rows, prompt_embeds_);
 
     std::lock_guard<std::mutex> lock(run_mutex_);
     try {
+        const bool benchmark_enabled = env_flag_enabled_local("VIENEU_V3_NATIVE_BENCHMARK");
         std::vector<float> synth_h;
-        auto t_prefill_start = std::chrono::high_resolution_clock::now();
-        if (!backbone_.prefill(prompt_embeds, synth_h)) {
+        auto t_prefill_start = benchmark_enabled ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
+        if (!backbone_.prefill(prompt_embeds_, synth_h)) {
             error = "Semantic backbone prefill failed.";
             return false;
         }
-        auto t_prefill_end = std::chrono::high_resolution_clock::now();
-        double prefill_ms = std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+        double prefill_ms = 0.0;
+        if (benchmark_enabled) {
+            auto t_prefill_end = std::chrono::high_resolution_clock::now();
+            prefill_ms = std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+        }
 
-        std::vector<std::unordered_set<int>> history;
+        std::vector<V3RepetitionHistory> history;
         if (std::fabs(params.repetition_penalty - 1.0f) > 1e-6f) {
             history.resize(static_cast<size_t>(config_.n_vq));
+            for (auto& item : history) {
+                item.initialize(static_cast<size_t>(config_.audio_vocab_size));
+            }
         }
 
         std::vector<int32_t> frames;
@@ -194,62 +241,80 @@ bool VieneuV3NativeEngine::synthesize_phonemes(
         codes.reserve(static_cast<size_t>(config_.n_vq));
 
         std::vector<float> synth_se;
+        synth_se.reserve(static_cast<size_t>(config_.hidden_size));
         const int H = config_.hidden_size;
 
         double acoustic_ms = 0.0;
         double backbone_decode_ms = 0.0;
         int actual_steps = 0;
+        bool saw_eos = false;
+        if (benchmark_enabled) {
+            acoustic_->reset_benchmark_stats();
+        }
 
         for (int t = 0; t < max_frames; ++t) {
             actual_steps++;
-            auto t_ac_start = std::chrono::high_resolution_clock::now();
+            auto t_ac_start = benchmark_enabled ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
             bool eos = false;
             if (!acoustic_->generate_frame(synth_h, params.temperature, params.top_k, params.top_p, params.repetition_penalty, history, codes, eos, error)) {
                 return false;
             }
-            auto t_ac_end = std::chrono::high_resolution_clock::now();
-            acoustic_ms += std::chrono::duration<double, std::milli>(t_ac_end - t_ac_start).count();
+            if (benchmark_enabled) {
+                auto t_ac_end = std::chrono::high_resolution_clock::now();
+                acoustic_ms += std::chrono::duration<double, std::milli>(t_ac_end - t_ac_start).count();
+            }
 
             for (int64_t code : codes) {
                 frames.push_back(static_cast<int32_t>(code));
             }
             if (eos) {
+                saw_eos = true;
                 break;
             }
 
             // Build next step input slot embedding: text generation start embedding + audio embeddings
-            synth_se = prompt_builder_->embed_slot(codes);
+            prompt_builder_->embed_slot_into(codes, synth_se);
             const float* sgs = assets_.text_emb().data() + config_.speech_generation_start_token_id * H;
             for (int h = 0; h < H; ++h) {
                 synth_se[h] += sgs[h];
             }
 
             // Incremental decode step in backbone
-            auto t_bb_start = std::chrono::high_resolution_clock::now();
+            auto t_bb_start = benchmark_enabled ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
             if (!backbone_.decode_step(synth_se, synth_h)) {
                 error = "Semantic backbone decode step failed.";
                 return false;
             }
-            auto t_bb_end = std::chrono::high_resolution_clock::now();
-            backbone_decode_ms += std::chrono::duration<double, std::milli>(t_bb_end - t_bb_start).count();
+            if (benchmark_enabled) {
+                auto t_bb_end = std::chrono::high_resolution_clock::now();
+                backbone_decode_ms += std::chrono::duration<double, std::milli>(t_bb_end - t_bb_start).count();
+            }
         }
 
         if (frames.empty()) {
             error = "VieNeu v3 native synthesis produced no acoustic frames.";
             return false;
         }
+        if (!saw_eos) {
+            std::cerr << "[V3NativeEngine] Warning: acoustic generation reached max_new_frames="
+                      << max_frames
+                      << " before EOS. Increase --max-new-frames or lower --max-chars if audio sounds truncated.\n";
+        }
 
         // MOSS decode
-        auto t_codec_start = std::chrono::high_resolution_clock::now();
+        auto t_codec_start = benchmark_enabled ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
         bool ok = codec_.decode(frames, static_cast<int64_t>(frames.size() / config_.n_vq), out_audio, error);
-        auto t_codec_end = std::chrono::high_resolution_clock::now();
-        double codec_ms = std::chrono::duration<double, std::milli>(t_codec_end - t_codec_start).count();
+        if (benchmark_enabled) {
+            auto t_codec_end = std::chrono::high_resolution_clock::now();
+            double codec_ms = std::chrono::duration<double, std::milli>(t_codec_end - t_codec_start).count();
 
-        std::cout << "[V3NativeEngine] Timing Breakdown:\n"
-                  << "  Prefill (backbone): " << prefill_ms << " ms\n"
-                  << "  Acoustic generation (" << actual_steps << " frames): " << acoustic_ms << " ms (avg " << (acoustic_ms / actual_steps) << " ms/frame)\n"
-                  << "  Backbone decode (" << (actual_steps - 1) << " steps): " << backbone_decode_ms << " ms (avg " << (actual_steps > 1 ? (backbone_decode_ms / (actual_steps - 1)) : 0.0) << " ms/step)\n"
-                  << "  MOSS codec decode: " << codec_ms << " ms\n";
+            std::cout << "[V3NativeEngine] Timing Breakdown:\n"
+                      << "  Prefill (backbone): " << prefill_ms << " ms\n"
+                      << "  Acoustic generation (" << actual_steps << " frames): " << acoustic_ms << " ms (avg " << (acoustic_ms / actual_steps) << " ms/frame)\n"
+                      << "  Backbone decode (" << (actual_steps - 1) << " steps): " << backbone_decode_ms << " ms (avg " << (actual_steps > 1 ? (backbone_decode_ms / (actual_steps - 1)) : 0.0) << " ms/step)\n"
+                      << "  MOSS codec decode: " << codec_ms << " ms\n";
+            acoustic_->print_benchmark_stats();
+        }
 
         return ok;
     } catch (const std::exception& e) {

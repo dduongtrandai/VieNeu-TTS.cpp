@@ -8,6 +8,7 @@
 struct V3BackboneParams {
     std::string model_path;
     int n_threads = 4;
+    int n_threads_batch = 4;
     int n_gpu_layers = 0;
 };
 
@@ -32,8 +33,13 @@ public:
 private:
     llama_model* model_ = nullptr;
     llama_context* ctx_ = nullptr;
+    llama_batch prefill_batch_{};
+    llama_batch decode_batch_{};
     int32_t decoded_pos_ = 0;
     int hidden_size_ = 768;
+    int prefill_capacity_ = 0;
+    bool prefill_batch_initialized_ = false;
+    bool decode_batch_initialized_ = false;
 
     static bool backend_initialized_;
 };

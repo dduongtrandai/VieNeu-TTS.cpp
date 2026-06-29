@@ -236,12 +236,12 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
 
     env_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "VieneuV3Onnx");
     session_options_ = std::make_unique<Ort::SessionOptions>();
-    int threads_to_use = env_int("VIENEU_ORT_THREADS", init.n_threads);
-    if (threads_to_use <= 0) {
+    threads_to_use_ = env_int("VIENEU_ORT_THREADS", init.n_threads);
+    if (threads_to_use_ <= 0) {
         unsigned int hardware_threads = std::thread::hardware_concurrency();
-        threads_to_use = hardware_threads > 0 ? (std::max)(1, static_cast<int>((std::min)(hardware_threads / 2, 4u))) : 4;
+        threads_to_use_ = hardware_threads > 0 ? (std::max)(1, static_cast<int>((std::min)(hardware_threads / 2, 4u))) : 4;
     }
-    session_options_->SetIntraOpNumThreads(threads_to_use);
+    session_options_->SetIntraOpNumThreads(threads_to_use_);
     const int inter_op_threads = env_int("VIENEU_ORT_INTER_OP_THREADS", 1);
     session_options_->SetInterOpNumThreads((std::max)(1, inter_op_threads));
     const std::string execution_mode = lowercase(getenv_string("VIENEU_ORT_EXECUTION_MODE"));
@@ -368,9 +368,12 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             return false;
         }
 
-        std::vector<std::unordered_set<int>> history;
+        std::vector<V3RepetitionHistory> history;
         if (std::fabs(params.repetition_penalty - 1.0f) > 1e-6f) {
             history.resize(static_cast<size_t>(config_.n_vq));
+            for (auto& item : history) {
+                item.initialize(static_cast<size_t>(config_.audio_vocab_size));
+            }
         }
         std::vector<int32_t> frames;
         const int max_frames = (std::max)(1, params.max_new_frames);

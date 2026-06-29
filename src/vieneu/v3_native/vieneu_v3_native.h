@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <unordered_set>
 #include <mutex>
 #include "v3_native_config.h"
 #include "v3_native_assets.h"
@@ -14,6 +13,7 @@
 #include "v3_native_backbone_llama.h"
 #include "v3_native_acoustic_ggml.h"
 #include "v3_native_moss_codec.h"
+#include "../v3_common/v3_repetition_history.h"
 
 struct VieneuV3NativeInit {
     std::string model_dir;
@@ -76,6 +76,7 @@ private:
     V3NativeBackbone backbone_;
     std::unique_ptr<V3NativeAcoustic> acoustic_;
     V3NativeMossCodec codec_;
+    std::vector<float> prompt_embeds_;
 
     std::mutex run_mutex_;
     std::unordered_map<std::string, VoicePreset> voice_presets_;
