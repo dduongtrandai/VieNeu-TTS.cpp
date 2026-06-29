@@ -87,12 +87,27 @@ set(VIENEU_V3_ONNX_SOURCES
     src/vieneu/v3_onnx/vieneu_v3_onnx_voice.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_utils.cpp
 )
+
+set(VIENEU_V3_NATIVE_SOURCES
+    src/vieneu/v3_native/v3_native_assets.cpp
+    src/vieneu/v3_native/v3_native_tokenizer.cpp
+    src/vieneu/v3_native/v3_native_prompt.cpp
+    src/vieneu/v3_native/v3_native_sampler.cpp
+    src/vieneu/v3_native/v3_native_backbone_llama.cpp
+    src/vieneu/v3_native/v3_native_acoustic_ggml.cpp
+    src/vieneu/v3_native/v3_native_moss_codec.cpp
+    src/vieneu/v3_native/v3_native_stream.cpp
+    src/vieneu/v3_native/v3_native_batch.cpp
+    src/vieneu/v3_native/vieneu_v3_native.cpp
+)
+
 # Core static library
 add_library(vieneu-tts-core STATIC
     src/backends/llama_backend.cpp
     src/codecs/neucodec_onnx.cpp
     src/vieneu/vieneu.cpp
     ${VIENEU_V3_ONNX_SOURCES}
+    ${VIENEU_V3_NATIVE_SOURCES}
 )
 
 target_include_directories(vieneu-tts-core PUBLIC
@@ -155,4 +170,5 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test-vieneu-phonemizer PRIVATE vieneu-tts-core)
     add_test(NAME vieneu-phonemizer COMMAND test-vieneu-phonemizer)
+
 endif()
