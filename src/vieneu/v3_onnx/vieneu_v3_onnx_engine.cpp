@@ -332,9 +332,10 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             return false;
         }
         Ort::Value prompt_tensor = Ort::Value::CreateTensor<float>(mem, prompt_embeds.data(), prompt_embeds.size(), prompt_shape.data(), prompt_shape.size());
+        const Ort::RunOptions run_options{nullptr};
         const auto prefill_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         auto pre = prefill_session_->Run(
-            Ort::RunOptions{nullptr},
+            run_options,
             prefill_io_.input_ptrs.data(),
             &prompt_tensor,
             1,
@@ -371,7 +372,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
         if (std::fabs(params.repetition_penalty - 1.0f) > 1e-6f) {
             history.resize(static_cast<size_t>(config_.n_vq));
         }
-        std::vector<int64_t> frames;
+        std::vector<int32_t> frames;
         const int max_frames = (std::max)(1, params.max_new_frames);
         frames.reserve(static_cast<size_t>(max_frames * config_.n_vq));
         std::vector<int64_t> codes;
@@ -385,7 +386,9 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             if (!acoustic_frame(synth_h_, params.temperature, params.top_k, params.top_p, params.repetition_penalty, history, codes, eos, error)) {
                 return false;
             }
-            frames.insert(frames.end(), codes.begin(), codes.end());
+            for (int64_t code : codes) {
+                frames.push_back(static_cast<int32_t>(code));
+            }
             if (eos) {
                 break;
             }
@@ -412,7 +415,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             for (auto& pv : past_v) synth_decode_inputs_.emplace_back(std::move(pv));
             const auto decode_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             auto dec = decode_session_->Run(
-                Ort::RunOptions{nullptr},
+                run_options,
                 decode_io_.input_ptrs.data(),
                 synth_decode_inputs_.data(),
                 synth_decode_inputs_.size(),

@@ -217,10 +217,8 @@ bool VieneuV3OnnxEngine::encode_reference_audio(
     }
 }
 
-bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error) {
+bool VieneuV3OnnxEngine::decode_codes(const std::vector<int32_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error) {
     try {
-        std::vector<int32_t> codes(frames.size());
-        for (size_t i = 0; i < frames.size(); ++i) codes[i] = static_cast<int32_t>(frames[i]);
         std::vector<int32_t> lengths = {static_cast<int32_t>(frame_count)};
         std::vector<int64_t> codes_shape = {1, frame_count, config_.n_vq};
         std::vector<int64_t> len_shape = {1};
@@ -230,11 +228,12 @@ bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_
             return false;
         }
         std::vector<Ort::Value> inputs;
-        inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, codes.data(), codes.size(), codes_shape.data(), codes_shape.size()));
+        inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, const_cast<int32_t*>(frames.data()), frames.size(), codes_shape.data(), codes_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, lengths.data(), lengths.size(), len_shape.data(), len_shape.size()));
+        const Ort::RunOptions run_options{nullptr};
         const auto decode_start = benchmark_enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         auto out = codec_decode_session_->Run(
-            Ort::RunOptions{nullptr},
+            run_options,
             codec_decode_io_.input_ptrs.data(),
             inputs.data(),
             inputs.size(),
@@ -245,17 +244,22 @@ bool VieneuV3OnnxEngine::decode_codes(const std::vector<int64_t>& frames, int64_
             benchmark_stats_.codec_decode_ms += std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
             benchmark_stats_.codec_decode_calls += 1;
         }
-        TensorBlob audio = copy_float_tensor(out[0]);
-        if (audio.shape.size() == 3 && audio.shape[0] == 1) {
-            const int64_t channels = audio.shape[1];
-            const int64_t samples = audio.shape[2];
+        const std::vector<int64_t> shape = tensor_shape(out[0]);
+        const float* audio_data = out[0].GetTensorData<float>();
+        if (shape.size() == 3 && shape[0] == 1) {
+            const int64_t channels = shape[1];
+            const int64_t samples = shape[2];
             out_audio.assign(static_cast<size_t>(samples), 0.0f);
             for (int64_t c = 0; c < channels; ++c) {
-                const float* src = audio.data.data() + c * samples;
+                const float* src = audio_data + c * samples;
                 for (int64_t i = 0; i < samples; ++i) out_audio[static_cast<size_t>(i)] += src[i] / static_cast<float>(channels);
             }
         } else {
-            out_audio = std::move(audio.data);
+            size_t count = 1;
+            for (int64_t dim : shape) {
+                count *= static_cast<size_t>(dim);
+            }
+            out_audio.assign(audio_data, audio_data + count);
         }
         return true;
     } catch (const std::exception& e) {

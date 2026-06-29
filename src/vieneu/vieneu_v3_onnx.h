@@ -185,7 +185,7 @@ private:
                           float top_p,
                           float repetition_penalty,
                           const std::unordered_set<int>* previous);
-    bool decode_codes(const std::vector<int64_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
+    bool decode_codes(const std::vector<int32_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
     std::string phonemize_for_v3(const std::string& text) const;
     void reset_benchmark_stats();
     void print_benchmark_stats() const;

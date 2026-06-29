@@ -188,19 +188,20 @@ bool VieneuV3OnnxEngine::acoustic_frame_onnx(
             error = "VieNeu v3 acoustic ONNX signature mismatch: expected 6 inputs and 5 outputs.";
             return false;
         }
-        acoustic_inputs_.clear();
-        acoustic_inputs_.reserve(6);
-        acoustic_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, acoustic_token_.data(), acoustic_token_.size(), token_shape.data(), token_shape.size()));
-        acoustic_inputs_.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, pos.data(), pos.size(), pos_shape.data(), pos_shape.size()));
-        acoustic_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()));
-        acoustic_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()));
-        acoustic_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()));
-        acoustic_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()));
+        std::array<Ort::Value, 6> acoustic_inputs = {
+            Ort::Value::CreateTensor<float>(mem, acoustic_token_.data(), acoustic_token_.size(), token_shape.data(), token_shape.size()),
+            Ort::Value::CreateTensor<int64_t>(mem, pos.data(), pos.size(), pos_shape.data(), pos_shape.size()),
+            Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()),
+            Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()),
+            Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()),
+            Ort::Value::CreateTensor<float>(mem, acoustic_empty_.data(), 0, empty_shape.data(), empty_shape.size()),
+        };
+        const Ort::RunOptions run_options{nullptr};
         auto out = acoustic_session_->Run(
-            Ort::RunOptions{nullptr},
+            run_options,
             acoustic_io_.input_ptrs.data(),
-            acoustic_inputs_.data(),
-            acoustic_inputs_.size(),
+            acoustic_inputs.data(),
+            acoustic_inputs.size(),
             acoustic_io_.output_ptrs.data(),
             acoustic_io_.output_ptrs.size());
         Ort::Value hidden_val = std::move(out[0]);
@@ -230,19 +231,19 @@ bool VieneuV3OnnxEngine::acoustic_frame_onnx(
             int64_t step_pos = ch + 1;
             std::array<int64_t, 3> step_token_shape = {1, 1, H};
             std::array<int64_t, 2> step_pos_shape = {1, 1};
-            acoustic_step_inputs_.clear();
-            acoustic_step_inputs_.reserve(6);
-            acoustic_step_inputs_.emplace_back(Ort::Value::CreateTensor<float>(mem, const_cast<float*>(emb), static_cast<size_t>(H), step_token_shape.data(), step_token_shape.size()));
-            acoustic_step_inputs_.emplace_back(Ort::Value::CreateTensor<int64_t>(mem, &step_pos, 1, step_pos_shape.data(), step_pos_shape.size()));
-            acoustic_step_inputs_.emplace_back(std::move(pk0));
-            acoustic_step_inputs_.emplace_back(std::move(pk1));
-            acoustic_step_inputs_.emplace_back(std::move(pv0));
-            acoustic_step_inputs_.emplace_back(std::move(pv1));
+            std::array<Ort::Value, 6> acoustic_step_inputs = {
+                Ort::Value::CreateTensor<float>(mem, const_cast<float*>(emb), static_cast<size_t>(H), step_token_shape.data(), step_token_shape.size()),
+                Ort::Value::CreateTensor<int64_t>(mem, &step_pos, 1, step_pos_shape.data(), step_pos_shape.size()),
+                std::move(pk0),
+                std::move(pk1),
+                std::move(pv0),
+                std::move(pv1),
+            };
             auto step_out = acoustic_session_->Run(
-                Ort::RunOptions{nullptr},
+                run_options,
                 acoustic_io_.input_ptrs.data(),
-                acoustic_step_inputs_.data(),
-                acoustic_step_inputs_.size(),
+                acoustic_step_inputs.data(),
+                acoustic_step_inputs.size(),
                 acoustic_io_.output_ptrs.data(),
                 acoustic_io_.output_ptrs.size());
             hidden_val = std::move(step_out[0]);
