@@ -78,8 +78,10 @@ NamedArray parse_npy(const uint8_t* data, size_t size, const std::string& name) 
         throw std::runtime_error("truncated npy header for " + name);
     }
     const std::string header(reinterpret_cast<const char*>(data + header_offset), header_len);
-    if (header.find("'descr': '<f2'") == std::string::npos && header.find("\"descr\": \"<f2\"") == std::string::npos) {
-        throw std::runtime_error("unsupported npy dtype for " + name + " (expected float16)");
+    const bool is_f16 = header.find("'descr': '<f2'") != std::string::npos || header.find("\"descr\": \"<f2\"") != std::string::npos;
+    const bool is_f32 = header.find("'descr': '<f4'") != std::string::npos || header.find("\"descr\": \"<f4\"") != std::string::npos;
+    if (!is_f16 && !is_f32) {
+        throw std::runtime_error("unsupported npy dtype for " + name + " (expected float16 or float32)");
     }
     if (header.find("True") != std::string::npos) {
         throw std::runtime_error("fortran-order npy arrays are not supported for " + name);
@@ -101,14 +103,23 @@ NamedArray parse_npy(const uint8_t* data, size_t size, const std::string& name) 
     }
 
     const size_t payload_offset = header_offset + header_len;
-    const size_t payload_bytes = static_cast<size_t>(count) * sizeof(uint16_t);
+    const size_t element_bytes = is_f16 ? sizeof(uint16_t) : sizeof(float);
+    const size_t payload_bytes = static_cast<size_t>(count) * element_bytes;
     if (payload_offset + payload_bytes > size) {
         throw std::runtime_error("truncated npy payload for " + name);
     }
     arr.data.resize(static_cast<size_t>(count));
     const uint8_t* p = data + payload_offset;
-    for (int64_t i = 0; i < count; ++i) {
-        arr.data[static_cast<size_t>(i)] = half_to_float(read_u16_le(p + i * 2));
+    if (is_f16) {
+        for (int64_t i = 0; i < count; ++i) {
+            arr.data[static_cast<size_t>(i)] = half_to_float(read_u16_le(p + i * 2));
+        }
+    } else {
+        for (int64_t i = 0; i < count; ++i) {
+            float v = 0.0f;
+            std::memcpy(&v, p + static_cast<size_t>(i) * sizeof(float), sizeof(float));
+            arr.data[static_cast<size_t>(i)] = v;
+        }
     }
     return arr;
 }
@@ -260,6 +271,9 @@ bool VieneuV3OnnxEngine::load_config(const std::string& path, std::string& error
         config_.text_vocab_size = c.value("text_vocab_size", config_.text_vocab_size);
         config_.audio_vocab_size = c.value("audio_vocab_size", config_.audio_vocab_size);
         config_.local_num_attention_heads = c.value("local_num_attention_heads", config_.local_num_attention_heads);
+        config_.local_num_hidden_layers = c.value("local_num_hidden_layers", config_.local_num_hidden_layers);
+        config_.local_intermediate_size = c.value("local_intermediate_size", config_.local_intermediate_size);
+        config_.rms_norm_eps = c.value("rms_norm_eps", config_.rms_norm_eps);
         return true;
     } catch (const std::exception& e) {
         error = std::string("Failed to load VieNeu v3 config: ") + e.what();
@@ -303,6 +317,74 @@ bool VieneuV3OnnxEngine::load_heads_npz(const std::string& path, std::string& er
         return true;
     } catch (const std::exception& e) {
         error = std::string("Failed to load vieneu_v3_heads.npz: ") + e.what();
+        return false;
+    }
+}
+
+bool VieneuV3OnnxEngine::load_acoustic_weights(const std::string& path, std::string& error) {
+    try {
+        if (!file_exists(path)) {
+            error = "Missing VieNeu v3 acoustic weights: " + path;
+            return false;
+        }
+        auto arrays = load_npz_stored(path);
+        const int H = config_.hidden_size;
+        const int I = config_.local_intermediate_size;
+        const int L = config_.local_num_hidden_layers;
+        const int nH = config_.local_num_attention_heads;
+        const int hd = H / nH;
+        if (H <= 0 || I <= 0 || L <= 0 || nH <= 0 || H % nH != 0) {
+            error = "Invalid acoustic decoder dimensions in config.json.";
+            return false;
+        }
+
+        auto take = [&](const std::string& name, std::initializer_list<int64_t> shape, std::vector<float>& dst) -> bool {
+            const std::string npy_name = name + ".npy";
+            auto it = arrays.find(npy_name);
+            if (it == arrays.end()) {
+                it = arrays.find(name);
+            }
+            if (it == arrays.end()) {
+                error = "Acoustic weights are missing tensor: " + name;
+                return false;
+            }
+            const std::vector<int64_t> expected(shape);
+            if (it->second.shape != expected) {
+                error = "Acoustic tensor shape mismatch for " + name + ".";
+                return false;
+            }
+            dst = std::move(it->second.data);
+            return true;
+        };
+
+        AcousticWeights weights;
+        if (!take("slot_pos_emb", {config_.n_vq + 1, H}, weights.slot_pos_emb) ||
+            !take("norm", {H}, weights.final_norm)) {
+            return false;
+        }
+
+        weights.layers.resize(static_cast<size_t>(L));
+        for (int layer = 0; layer < L; ++layer) {
+            AcousticLayerWeights& w = weights.layers[static_cast<size_t>(layer)];
+            const std::string prefix = "layers." + std::to_string(layer) + ".";
+            if (!take(prefix + "norm1", {H}, w.norm1) ||
+                !take(prefix + "attn.qkv", {3 * H, H}, w.qkv) ||
+                !take(prefix + "attn.q_norm", {hd}, w.q_norm) ||
+                !take(prefix + "attn.k_norm", {hd}, w.k_norm) ||
+                !take(prefix + "attn.o_proj", {H, H}, w.o_proj) ||
+                !take(prefix + "norm2", {H}, w.norm2) ||
+                !take(prefix + "ff_up", {I, H}, w.ff_up) ||
+                !take(prefix + "ff_gate", {I, H}, w.ff_gate) ||
+                !take(prefix + "ff_down", {H, I}, w.ff_down)) {
+                return false;
+            }
+        }
+
+        weights.loaded = true;
+        acoustic_weights_ = std::move(weights);
+        return true;
+    } catch (const std::exception& e) {
+        error = std::string("Failed to load VieNeu v3 acoustic weights: ") + e.what();
         return false;
     }
 }

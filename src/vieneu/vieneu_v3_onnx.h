@@ -19,7 +19,7 @@ struct VieneuV3OnnxInit {
     std::string config_path;
     std::string tokenizer_path;
     std::string voices_json_path;
-    int n_threads = 4;
+    int n_threads = 2;
 };
 
 struct VieneuV3OnnxParams {
@@ -72,6 +72,28 @@ private:
         int text_vocab_size = 419;
         int audio_vocab_size = 1024;
         int local_num_attention_heads = 8;
+        int local_num_hidden_layers = 2;
+        int local_intermediate_size = 2048;
+        float rms_norm_eps = 1e-6f;
+    };
+
+    struct AcousticLayerWeights {
+        std::vector<float> norm1;
+        std::vector<float> qkv;
+        std::vector<float> q_norm;
+        std::vector<float> k_norm;
+        std::vector<float> o_proj;
+        std::vector<float> norm2;
+        std::vector<float> ff_up;
+        std::vector<float> ff_gate;
+        std::vector<float> ff_down;
+    };
+
+    struct AcousticWeights {
+        std::vector<float> slot_pos_emb;
+        std::vector<float> final_norm;
+        std::vector<AcousticLayerWeights> layers;
+        bool loaded = false;
     };
 
     struct PromptRows {
@@ -100,6 +122,17 @@ private:
         std::vector<const char*> output_ptrs;
     };
 
+    struct BenchmarkStats {
+        double prefill_ms = 0.0;
+        double decode_step_ms = 0.0;
+        double acoustic_frame_ms = 0.0;
+        double codec_decode_ms = 0.0;
+        int64_t prefill_calls = 0;
+        int64_t decode_step_calls = 0;
+        int64_t acoustic_frame_calls = 0;
+        int64_t codec_decode_calls = 0;
+    };
+
     struct ByteBpeTokenizer {
         bool load(const std::string& path, std::string& error);
         std::vector<int64_t> encode(const std::string& text) const;
@@ -108,6 +141,24 @@ private:
         std::unordered_map<std::string, int> merge_ranks;
         int64_t unk_id = 43;
     };
+
+    class AcousticExecutor {
+    public:
+        virtual ~AcousticExecutor() = default;
+        virtual const char* backend_name() const = 0;
+        virtual bool generate_frame(const std::vector<float>& h,
+                                    float temperature,
+                                    int top_k,
+                                    float top_p,
+                                    float repetition_penalty,
+                                    std::vector<std::unordered_set<int>>& history,
+                                    std::vector<int64_t>& codes,
+                                    bool& eos,
+                                    std::string& error) = 0;
+    };
+
+    class OnnxAcousticExecutor;
+    class NativeAcousticExecutor;
 
     static std::string join_path(const std::string& dir, const std::string& name);
     static bool file_exists(const std::string& path);
@@ -119,6 +170,7 @@ private:
     bool load_voices(const std::string& voices_path, std::string& error);
     bool load_config(const std::string& path, std::string& error);
     bool load_heads_npz(const std::string& path, std::string& error);
+    bool load_acoustic_weights(const std::string& path, std::string& error);
     bool parse_voice_reserved_id(const std::string& voice_id, int& reserved_id) const;
     bool resolve_voice_preset(const std::string& voice_id, VoicePreset& preset, std::string& error) const;
     bool read_wav_file(const std::string& path, WavData& wav, std::string& error) const;
@@ -132,6 +184,8 @@ private:
                              const VieneuV3OnnxParams& params,
                              std::vector<float>& out_audio,
                              std::string& error);
+    bool initialize_acoustic_executor(std::string& error);
+    bool initialize_native_acoustic_executor(std::string& error);
     bool acoustic_frame(const std::vector<float>& h,
                         float temperature,
                         int top_k,
@@ -141,14 +195,26 @@ private:
                         std::vector<int64_t>& codes,
                         bool& eos,
                         std::string& error);
+    bool acoustic_frame_onnx(const std::vector<float>& h,
+                             float temperature,
+                             int top_k,
+                             float top_p,
+                             float repetition_penalty,
+                             std::vector<std::unordered_set<int>>& history,
+                             std::vector<int64_t>& codes,
+                             bool& eos,
+                             std::string& error);
     int64_t sample_logits(std::vector<float>& logits,
                           float temperature,
                           int top_k,
                           float top_p,
                           float repetition_penalty,
                           const std::unordered_set<int>* previous);
-    bool decode_codes(const std::vector<int64_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
+    bool decode_codes(const std::vector<int32_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
     std::string phonemize_for_v3(const std::string& text) const;
+    void reset_benchmark_stats();
+    void print_benchmark_stats() const;
+    Ort::MemoryInfo& cpu_memory_info();
 
     std::shared_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::SessionOptions> session_options_;
@@ -157,6 +223,8 @@ private:
     std::unique_ptr<Ort::Session> acoustic_session_;
     std::unique_ptr<Ort::Session> codec_decode_session_;
     std::unique_ptr<Ort::Session> codec_encode_session_;
+    std::unique_ptr<AcousticExecutor> acoustic_executor_;
+    std::unique_ptr<Ort::MemoryInfo> cpu_memory_info_;
     SessionIo prefill_io_;
     SessionIo decode_io_;
     SessionIo acoustic_io_;
@@ -171,6 +239,7 @@ private:
     Tensor2D text_emb_t_;
     Tensor3D audio_emb_;
     Tensor3D audio_emb_t_;
+    AcousticWeights acoustic_weights_;
     ByteBpeTokenizer tokenizer_;
     std::string model_dir_;
     std::string onnx_dir_;
@@ -178,11 +247,24 @@ private:
     std::mutex run_mutex_;
     std::mt19937 rng_;
     bool initialized_ = false;
+    bool benchmark_enabled_ = false;
+    BenchmarkStats benchmark_stats_;
 
     // Scratch buffers for sampling to avoid allocation overhead
     std::vector<float> sampling_tmp_;
     std::vector<std::pair<float, size_t>> sampling_pairs_;
     std::vector<float> sampling_probs_;
+
+    std::vector<float> synth_h_;
+    std::vector<float> synth_se_;
+    std::vector<Ort::Value> synth_decode_inputs_;
+    std::vector<float> acoustic_token_;
+    std::vector<float> acoustic_empty_;
+    std::vector<float> acoustic_slot0_;
+    std::vector<float> acoustic_logits_;
+    std::vector<float> acoustic_text_logits_;
+    std::vector<Ort::Value> acoustic_inputs_;
+    std::vector<Ort::Value> acoustic_step_inputs_;
 };
 
 #endif // VIENEU_V3_ONNX_H

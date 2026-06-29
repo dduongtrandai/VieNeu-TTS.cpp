@@ -9,6 +9,9 @@
 
 param (
     [string]$OnnxRuntimeVersion = "1.24.4",
+    [ValidateSet("cpu", "directml", "openvino")]
+    [string]$OnnxRuntimeFlavor = "cpu",
+    [string]$OpenVINOOnnxRuntimeVersion = "1.24.1",
     [switch]$Clean,
     [switch]$NoPackage,
     [string]$LlamaCppRepo = "https://github.com/ggml-org/llama.cpp.git",
@@ -33,29 +36,62 @@ if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
 
 # 2. Check and Download ONNX Runtime SDK if missing
 $OrtSdkDir = Join-Path $PSScriptRoot "ort_sdk"
-$OrtRootName = "onnxruntime-win-x64-$OnnxRuntimeVersion"
-$OrtRoot = Join-Path $OrtSdkDir $OrtRootName
 
-if (-not (Test-Path $OrtRoot)) {
-    Write-Host "ONNX Runtime SDK v$OnnxRuntimeVersion not found. Downloading..." -ForegroundColor Yellow
+function Expand-NuGetPackage([string]$PackageId, [string]$Version, [string]$DestinationRoot) {
+    if (Test-Path $DestinationRoot) {
+        return
+    }
+
+    Write-Host "$PackageId v$Version not found. Downloading..." -ForegroundColor Yellow
     if (-not (Test-Path $OrtSdkDir)) {
         New-Item -ItemType Directory -Path $OrtSdkDir | Out-Null
     }
-    
-    $Url = "https://github.com/microsoft/onnxruntime/releases/download/v$OnnxRuntimeVersion/$OrtRootName.zip"
-    $ZipPath = Join-Path $OrtSdkDir "$OrtRootName.zip"
-    
-    Write-Host "Downloading ONNX Runtime SDK from $Url..." -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $Url -OutFile $ZipPath
-    
-    Write-Host "Extracting ONNX Runtime SDK to $OrtSdkDir..." -ForegroundColor Cyan
-    Expand-Archive -Path $ZipPath -DestinationPath $OrtSdkDir -Force
-    
-    Remove-Item $ZipPath -Force
-    Write-Host "ONNX Runtime SDK successfully installed at $OrtRoot" -ForegroundColor Green
-} else {
-    Write-Host "Found ONNX Runtime SDK at $OrtRoot" -ForegroundColor Green
+
+    $PackagePath = Join-Path $OrtSdkDir "$PackageId.$Version.zip"
+    $Url = "https://www.nuget.org/api/v2/package/$PackageId/$Version"
+    Write-Host "Downloading NuGet package from $Url..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri $Url -OutFile $PackagePath
+
+    Write-Host "Extracting NuGet package to $DestinationRoot..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
+    Expand-Archive -Path $PackagePath -DestinationPath $DestinationRoot -Force
+    Remove-Item $PackagePath -Force
 }
+
+if ($OnnxRuntimeFlavor -eq "cpu") {
+    $OrtRootName = "onnxruntime-win-x64-$OnnxRuntimeVersion"
+    $OrtRoot = Join-Path $OrtSdkDir $OrtRootName
+    if (-not (Test-Path $OrtRoot)) {
+        Write-Host "ONNX Runtime CPU SDK v$OnnxRuntimeVersion not found. Downloading..." -ForegroundColor Yellow
+        if (-not (Test-Path $OrtSdkDir)) {
+            New-Item -ItemType Directory -Path $OrtSdkDir | Out-Null
+        }
+
+        $Url = "https://github.com/microsoft/onnxruntime/releases/download/v$OnnxRuntimeVersion/$OrtRootName.zip"
+        $ZipPath = Join-Path $OrtSdkDir "$OrtRootName.zip"
+
+        Write-Host "Downloading ONNX Runtime SDK from $Url..." -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $Url -OutFile $ZipPath
+
+        Write-Host "Extracting ONNX Runtime SDK to $OrtSdkDir..." -ForegroundColor Cyan
+        Expand-Archive -Path $ZipPath -DestinationPath $OrtSdkDir -Force
+
+        Remove-Item $ZipPath -Force
+        Write-Host "ONNX Runtime CPU SDK successfully installed at $OrtRoot" -ForegroundColor Green
+    } else {
+        Write-Host "Found ONNX Runtime CPU SDK at $OrtRoot" -ForegroundColor Green
+    }
+} elseif ($OnnxRuntimeFlavor -eq "directml") {
+    $OrtRoot = Join-Path $OrtSdkDir "Microsoft.ML.OnnxRuntime.DirectML-$OnnxRuntimeVersion"
+    Expand-NuGetPackage "Microsoft.ML.OnnxRuntime.DirectML" $OnnxRuntimeVersion $OrtRoot
+    Write-Host "Using ONNX Runtime DirectML package at $OrtRoot" -ForegroundColor Green
+} else {
+    $OrtRoot = Join-Path $OrtSdkDir "Intel.ML.OnnxRuntime.OpenVino-$OpenVINOOnnxRuntimeVersion"
+    Expand-NuGetPackage "Intel.ML.OnnxRuntime.OpenVino" $OpenVINOOnnxRuntimeVersion $OrtRoot
+    Write-Host "Using ONNX Runtime OpenVINO package at $OrtRoot" -ForegroundColor Green
+}
+
+$SelectedOnnxRuntimeVersion = if ($OnnxRuntimeFlavor -eq "openvino") { $OpenVINOOnnxRuntimeVersion } else { $OnnxRuntimeVersion }
 
 # 3. Check for compiler tools and load VS environment if needed
 if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
@@ -154,12 +190,37 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Build failed."
 }
 
-# 8. Package the runtime if not disabled
+# 8. Copy ONNX Runtime DLLs next to the locally built executables.
+Write-Host "Copying ONNX Runtime runtime DLLs..." -ForegroundColor Cyan
+$OrtRuntimeRoots = @(
+    (Join-Path $OrtRoot "bin"),
+    (Join-Path $OrtRoot "lib"),
+    (Join-Path $OrtRoot "runtimes\win-x64\native"),
+    $OrtRoot
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+$OrtRuntimePatterns = @(
+    "onnxruntime.dll",
+    "onnxruntime_providers*.dll",
+    "DirectML.dll",
+    "openvino*.dll",
+    "tbb*.dll"
+)
+
+foreach ($root in $OrtRuntimeRoots) {
+    foreach ($pattern in $OrtRuntimePatterns) {
+        Get-ChildItem -LiteralPath $root -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $BuildPath -Force
+        }
+    }
+}
+
+# 9. Package the runtime if not disabled
 if (-not $NoPackage) {
     Write-Host "Packaging runtime..." -ForegroundColor Cyan
     $PackageScript = Join-Path $PSScriptRoot "scripts/package-runtime.ps1"
     if (Test-Path $PackageScript) {
-        & $PackageScript -BuildDir "build" -OutputDir "dist" -OnnxRuntimeRoot $OrtRoot -RuntimeVersion "local"
+        & $PackageScript -BuildDir "build" -OutputDir "dist" -OnnxRuntimeRoot $OrtRoot -RuntimeFlavor $OnnxRuntimeFlavor -OnnxRuntimeVersion $SelectedOnnxRuntimeVersion -RuntimeVersion "local"
     } else {
         Write-Warning "Could not find package script at $PackageScript"
     }

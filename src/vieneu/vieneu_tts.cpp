@@ -184,7 +184,7 @@ VIENEU_API void vieneu_init_v2_default_params(struct vieneu_init_params_v2 * p) 
         p->config_path = nullptr;
         p->tokenizer_path = nullptr;
         p->voices_json_path = nullptr;
-        p->n_threads = 4;
+        p->n_threads = 2;
     }
 }
 

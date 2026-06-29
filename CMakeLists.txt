@@ -4,6 +4,7 @@ project(vieneu-tts-project LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(CTest)
+find_package(OpenMP)
 
 # DLL/Output Directory setup (same as build root)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -44,11 +45,33 @@ add_subdirectory(${VIENEU_LLAMA_DIR} llama_cpp_build EXCLUDE_FROM_ALL)
 
 # Find ONNX Runtime dependency
 unset(ONNXRUNTIME_LIB CACHE)
+unset(ONNXRUNTIME_INCLUDE_DIR CACHE)
 if(ONNXRUNTIME_ROOT)
-    include_directories(SYSTEM "${ONNXRUNTIME_ROOT}/include")
-    link_directories("${ONNXRUNTIME_ROOT}/lib")
-    find_library(ONNXRUNTIME_LIB NAMES onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+    set(ONNXRUNTIME_INCLUDE_CANDIDATES
+        "${ONNXRUNTIME_ROOT}/include"
+        "${ONNXRUNTIME_ROOT}/build/native/include"
+    )
+    set(ONNXRUNTIME_LIB_CANDIDATES
+        "${ONNXRUNTIME_ROOT}/lib"
+        "${ONNXRUNTIME_ROOT}/bin"
+        "${ONNXRUNTIME_ROOT}/runtimes/win-x64/native"
+        "${ONNXRUNTIME_ROOT}"
+    )
+    find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime_c_api.h
+        PATHS ${ONNXRUNTIME_INCLUDE_CANDIDATES}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    find_library(ONNXRUNTIME_LIB
+        NAMES onnxruntime
+        PATHS ${ONNXRUNTIME_LIB_CANDIDATES}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    include_directories(SYSTEM "${ONNXRUNTIME_INCLUDE_DIR}")
     message(STATUS "ONNX Runtime library found at: ${ONNXRUNTIME_LIB}")
+    message(STATUS "ONNX Runtime headers found at: ${ONNXRUNTIME_INCLUDE_DIR}")
 else()
     find_library(ONNXRUNTIME_LIB NAMES onnxruntime REQUIRED)
 endif()
@@ -59,11 +82,11 @@ set(VIENEU_V3_ONNX_SOURCES
     src/vieneu/v3_onnx/vieneu_v3_onnx_tokenizer.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_audio.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_inference.cpp
+    src/vieneu/v3_onnx/vieneu_v3_onnx_acoustic_native.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_sampling.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_voice.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_utils.cpp
 )
-
 # Core static library
 add_library(vieneu-tts-core STATIC
     src/backends/llama_backend.cpp
@@ -82,6 +105,9 @@ target_link_libraries(vieneu-tts-core PUBLIC
     llama
     ${ONNXRUNTIME_LIB}
 )
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(vieneu-tts-core PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 # Shared library for ABI consumers (vieneu-tts.dll)
 add_library(vieneu-tts SHARED

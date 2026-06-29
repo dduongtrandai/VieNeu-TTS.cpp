@@ -2,6 +2,9 @@ param (
     [string]$BuildDir = "build",
     [string]$OutputDir = "dist",
     [string]$OnnxRuntimeRoot = $env:ONNXRUNTIME_ROOT,
+    [ValidateSet("cpu", "directml", "openvino")]
+    [string]$RuntimeFlavor = "cpu",
+    [string]$OnnxRuntimeVersion = "",
     [string]$RuntimeVersion = ""
 )
 
@@ -18,13 +21,14 @@ if (-not $RuntimeVersion) {
 Write-Host "========================================="
 Write-Host "Packaging VieNeu TTS Runtime Release..."
 Write-Host "========================================="
+Write-Host "Runtime flavor: $RuntimeFlavor"
 
 # Create output dir
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
 }
 
-$ZipPath = Join-Path $OutputDir "vieneu-tts-win-cpu.zip"
+$ZipPath = Join-Path $OutputDir "vieneu-tts-win-$RuntimeFlavor.zip"
 if (Test-Path $ZipPath) {
     Remove-Item $ZipPath
 }
@@ -113,6 +117,7 @@ $OrtCandidates = @()
 if ($OnnxRuntimeRoot) {
     $OrtCandidates += (Join-Path $OnnxRuntimeRoot "bin\onnxruntime.dll")
     $OrtCandidates += (Join-Path $OnnxRuntimeRoot "lib\onnxruntime.dll")
+    $OrtCandidates += (Join-Path $OnnxRuntimeRoot "runtimes\win-x64\native\onnxruntime.dll")
     $OrtCandidates += (Join-Path $OnnxRuntimeRoot "onnxruntime.dll")
 }
 $OrtCandidates += (Join-Path $BuildDir "onnxruntime.dll")
@@ -136,6 +141,36 @@ if (-not $OrtDllSrc) {
 
 Write-Host "Copying ONNX Runtime DLL from: $OrtDllSrc"
 Copy-Item $OrtDllSrc $StagingDir
+
+# Copy optional ONNX Runtime provider dependencies when the supplied SDK includes
+# CUDA, OpenVINO, DirectML, or other EP-specific runtime DLLs.
+$OrtProviderRoots = @()
+if ($OnnxRuntimeRoot) {
+    $OrtProviderRoots += (Join-Path $OnnxRuntimeRoot "bin")
+    $OrtProviderRoots += (Join-Path $OnnxRuntimeRoot "lib")
+    $OrtProviderRoots += (Join-Path $OnnxRuntimeRoot "runtimes\win-x64\native")
+    $OrtProviderRoots += $OnnxRuntimeRoot
+}
+$OrtProviderRoots += $BuildDir
+$OrtProviderRoots += (Join-Path $BuildDir "Release")
+$OrtProviderRoots += (Join-Path $BuildDir "RelWithDebInfo")
+$OrtProviderRoots += (Join-Path (Join-Path $BuildDir "bin") "Release")
+$OrtProviderRoots += (Join-Path (Join-Path $BuildDir "bin") "RelWithDebInfo")
+
+$OrtProviderPatterns = @(
+    "onnxruntime_providers*.dll",
+    "DirectML.dll",
+    "openvino*.dll",
+    "tbb*.dll"
+)
+
+foreach ($root in ($OrtProviderRoots | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)) {
+    foreach ($pattern in $OrtProviderPatterns) {
+        Get-ChildItem -LiteralPath $root -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-RuntimeDll -SourcePath $_.FullName -DestinationDir $StagingDir
+        }
+    }
+}
 
 # Copy llama.cpp shared DLLs if the build produced them. Visual Studio builds from
 # llama.cpp usually place these under build/bin/Release, not the build root.
@@ -193,19 +228,25 @@ foreach ($lf in $LicenseFiles) {
 
 # Write backend-manifest.json
 $ManifestPath = Join-Path $StagingDir "backend-manifest.json"
+$runtimeLabel = switch ($RuntimeFlavor) {
+    "cpu" { "CPU" }
+    "directml" { "DirectML" }
+    "openvino" { "OpenVINO" }
+}
+
 $ManifestContent = @{
-    id = "vieneu-tts-win-x86_64-cpu"
-    name = "CPU VieNeu TTS Pipeline (x64)"
+    id = "vieneu-tts-win-x86_64-$RuntimeFlavor"
+    name = "$runtimeLabel VieNeu TTS Pipeline (x64)"
     version = "v0.1.0"
     type = "tts"
     engineFamily = "vieneu-tts"
-    variant = "win-x86_64-cpu"
+    variant = "win-x86_64-$RuntimeFlavor"
     library = "vieneu-tts.dll"
     metadata = @{
         backend = "vieneu-tts"
         components = @{
             "llama.cpp" = "b4600" # fallback/placeholder commit
-            "onnxruntime" = "1.24.4"
+            "onnxruntime" = if ($OnnxRuntimeVersion) { $OnnxRuntimeVersion } else { "unknown" }
         }
         profiles = @("vieneu-v2-turbo", "vieneu-v3-onnx")
     }
