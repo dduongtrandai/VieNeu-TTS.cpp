@@ -9,7 +9,7 @@ outputs/
 # Dependencies
 .models/
 ort_sdk/
-llama.cpp/
+/llama.cpp/
 onnxruntime-win-*.zip
 
 # Visual Studio files

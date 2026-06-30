@@ -238,7 +238,7 @@ New-Item -ItemType Directory -Path $LicensesDir | Out-Null
 $LicenseFiles = @(
     (Join-Path $ProjectRoot "LICENSE"),
     (Join-Path $ProjectRoot "README.md"),
-    (Join-Path (Join-Path $ProjectRoot "llama.cpp") "LICENSE")
+    (Join-Path (Join-Path (Join-Path $ProjectRoot "third_party") "llama.cpp") "LICENSE")
 )
 foreach ($lf in $LicenseFiles) {
     if (Test-Path $lf) {

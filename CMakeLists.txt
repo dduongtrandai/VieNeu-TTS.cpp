@@ -17,7 +17,7 @@ if(MSVC)
 endif()
 
 # Configuration Options
-set(VIENEU_LLAMA_DIR "../llama.cpp" CACHE PATH "Path to llama.cpp source directory")
+set(VIENEU_LLAMA_DIR "third_party/llama.cpp" CACHE PATH "Path to llama.cpp source directory")
 set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to ONNX Runtime SDK root")
 option(VIENEU_PORTABLE_CPU "Build portable CPU kernels instead of host-native SIMD kernels" OFF)
 set(VIENEU_NATIVE_BACKEND "cpu" CACHE STRING "Native ggml backend to build: cpu, cuda, vulkan, or metal")

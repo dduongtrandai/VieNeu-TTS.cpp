@@ -55,11 +55,15 @@ Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "ONNX Runtime flavor: $OnnxRuntimeFlavor" -ForegroundColor Cyan
 Write-Host "Native ggml backend: $NativeBackend" -ForegroundColor Cyan
 
-# 1. Check and Clone llama.cpp if missing
-$LlamaDir = Join-Path $ProjectRoot "llama.cpp"
+# 1. Check and initialize llama.cpp submodule if missing
+$LlamaDir = Join-Path $ProjectRoot "third_party\llama.cpp"
 if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
-    Write-Host "llama.cpp source not found. Cloning ggml-org/llama.cpp..." -ForegroundColor Yellow
-    git clone --depth 1 $LlamaCppRepo $LlamaDir
+    Write-Host "llama.cpp submodule not found. Initializing submodules..." -ForegroundColor Yellow
+    git submodule update --init --recursive --depth 1 third_party/llama.cpp
+    if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
+        Write-Host "Submodule init did not produce llama.cpp. Cloning fallback from $LlamaCppRepo..." -ForegroundColor Yellow
+        git clone --depth 1 $LlamaCppRepo $LlamaDir
+    }
 } else {
     Write-Host "Found llama.cpp source directory." -ForegroundColor Green
 }

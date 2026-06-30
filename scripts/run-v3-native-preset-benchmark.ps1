@@ -16,7 +16,7 @@ param(
     [string]$OnnxDir = ".models\vieneu-v3-turbo",
     [string]$VoicesJson = "",
     [string]$OnnxRuntimeRoot = "",
-    [string]$LlamaDir = "llama.cpp",
+    [string]$LlamaDir = "third_party\llama.cpp",
     [switch]$NoBuild,
     [switch]$NoBenchmark,
     [switch]$UseDirectLinear,
@@ -141,21 +141,25 @@ function Copy-RuntimeDlls([string]$CliExe) {
     $exeDir = Split-Path -Parent $CliExe
     New-Item -ItemType Directory -Force -Path $exeDir | Out-Null
 
-    foreach ($binDir in @((Join-Path $BuildDir "bin\Release"), (Join-Path $BuildDir "bin"))) {
-        if (Test-Path $binDir) {
-            Get-ChildItem -LiteralPath $binDir -Filter "*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination $exeDir -Force
+    $runtimeDirs = @(
+        (Join-Path $BuildDir "bin\Release"),
+        (Join-Path $BuildDir "bin"),
+        (Join-Path $BuildDir "Release"),
+        $BuildDir,
+        (Join-Path $exeDir "bin\Release"),
+        (Join-Path $exeDir "bin"),
+        (Join-Path $exeDir "Release"),
+        $exeDir
+    ) | Select-Object -Unique
+
+    foreach ($runtimeDir in $runtimeDirs) {
+        if (Test-Path $runtimeDir) {
+            Get-ChildItem -LiteralPath $runtimeDir -Filter "*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.DirectoryName -ne $exeDir) {
+                    Copy-Item -LiteralPath $_.FullName -Destination $exeDir -Force
+                }
             }
         }
-    }
-
-    $dllSrc = Join-Path $BuildDir "Release\vieneu-tts.dll"
-    if (Test-Path $dllSrc) {
-        Copy-Item -LiteralPath $dllSrc -Destination $exeDir -Force
-    }
-    $dllSrc = Join-Path $BuildDir "vieneu-tts.dll"
-    if (Test-Path $dllSrc) {
-        Copy-Item -LiteralPath $dllSrc -Destination $exeDir -Force
     }
 
     $resolvedOrt = Find-OnnxRuntimeRoot
@@ -168,7 +172,9 @@ function Copy-RuntimeDlls([string]$CliExe) {
             if (Test-Path $ortLib) {
                 foreach ($pattern in @("onnxruntime.dll", "onnxruntime_providers*.dll", "DirectML.dll", "openvino*.dll", "tbb*.dll")) {
                     Get-ChildItem -LiteralPath $ortLib -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
-                        Copy-Item -LiteralPath $_.FullName -Destination $exeDir -Force
+                        if ($_.DirectoryName -ne $exeDir) {
+                            Copy-Item -LiteralPath $_.FullName -Destination $exeDir -Force
+                        }
                     }
                 }
             }

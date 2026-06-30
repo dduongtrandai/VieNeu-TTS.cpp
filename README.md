@@ -32,7 +32,7 @@ A native, high-performance C++ inference engine for the VieNeu-TTS model family.
 To build `vieneu-tts.cpp`, you will need:
 - A C++17 compatible compiler (MSVC, GCC, or Clang)
 - CMake (version 3.14 or higher)
-- **llama.cpp**: Source code must be placed in a directory sibling to this repository, or customize its path using `-DVIENEU_LLAMA_DIR`.
+- **llama.cpp**: Managed as a Git submodule at `third_party/llama.cpp`, or customize its path using `-DVIENEU_LLAMA_DIR`.
 - **ONNX Runtime**: The prebuilt C/C++ SDK library and headers.
 
 ---
@@ -41,7 +41,7 @@ To build `vieneu-tts.cpp`, you will need:
 
 ### Easy Local Build (Windows)
 
-We provide a helper PowerShell script [build-local.ps1](build-local.ps1) in the root directory that automates cloning `llama.cpp`, downloading ONNX Runtime SDK, setting up MSVC compiler paths, configuring CMake, building the project, and packaging it.
+We provide a helper PowerShell script [build-local.ps1](build-local.ps1) in the root directory that initializes the `llama.cpp` submodule, downloads ONNX Runtime SDK, sets up MSVC compiler paths, configures CMake, builds the project, and packages it.
 
 To build the project locally, open a PowerShell console and run:
 
@@ -53,7 +53,7 @@ To build the project locally, open a PowerShell console and run:
 - `-OnnxRuntimeVersion <string>`: Specify ONNX Runtime SDK version to download (default: `1.24.4`).
 - `-Clean`: Clean the `build` directory before configuring CMake.
 - `-NoPackage`: Build the project but do not create the final zip package.
-- `-LlamaCppRepo <string>`: Custom Git repository URL for `llama.cpp`.
+- `-LlamaCppRepo <string>`: Custom fallback Git repository URL for `llama.cpp` if submodule initialization is unavailable.
 - `-Generator <string>`: CMake generator to use (default: `Ninja`).
 
 ### Manual Build via CMake (CLI)
@@ -63,7 +63,7 @@ mkdir build
 cd build
 
 # On Windows (MSVC + ONNX Runtime)
-cmake .. -DONNXRUNTIME_ROOT="C:/path/to/onnxruntime" -DVIENEU_LLAMA_DIR="../../llama.cpp"
+cmake .. -DONNXRUNTIME_ROOT="C:/path/to/onnxruntime" -DVIENEU_LLAMA_DIR="../third_party/llama.cpp"
 
 # Build the project
 cmake --build . --config Release

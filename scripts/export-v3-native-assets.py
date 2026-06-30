@@ -15,7 +15,7 @@ import numpy as np
 import safetensors.torch
 
 # Add llama.cpp/gguf-py to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "llama.cpp" / "gguf-py"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "third_party" / "llama.cpp" / "gguf-py"))
 from gguf import GGUFWriter
 
 
