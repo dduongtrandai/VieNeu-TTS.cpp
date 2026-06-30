@@ -11,19 +11,19 @@ param(
     [float]$TopP = 0.95,
     [int]$MaxChars = 384,
     [int]$Threads = 4,
-    [string]$ModelDir = ".models\vieneu-v3-turbo",
+    [string]$ModelDir = ".models\vieneu-v3-turbo-native",
     [string]$CodecDir = "",
-    [string]$OnnxDir = ".models\vieneu-v3-turbo",
+    [string]$OnnxDir = "",
     [string]$VoicesJson = "",
     [string]$OnnxRuntimeRoot = "",
     [string]$LlamaDir = "third_party\llama.cpp",
-    [switch]$NoBuild,
-    [switch]$NoBenchmark,
+    [switch]$NoBuild = $true,
+    [switch]$NoBenchmark = $true,
     [switch]$UseDirectLinear,
     [switch]$UseGgmlLinear,
-    [switch]$DisableGgmlHeads,
-    [switch]$NoFuseFfn,
-    [switch]$DisableQ8Ffn
+    [bool]$GgmlHeads = $true,
+    [bool]$FuseFfn = $true,
+    [bool]$Q8Ffn = $false
 )
 
 Set-StrictMode -Version Latest
@@ -285,9 +285,9 @@ try {
             $env:VIENEU_ACOUSTIC_DIRECT_LINEAR = "1"
             $env:VIENEU_ACOUSTIC_GGML_LINEAR = "0"
         }
-        $env:VIENEU_ACOUSTIC_GGML_HEADS = if ($DisableGgmlHeads) { "0" } else { "1" }
-        $env:VIENEU_GGML_FUSE_FFN = if ($NoFuseFfn) { "0" } else { "1" }
-        $env:VIENEU_ACOUSTIC_Q8_FFN = if ($DisableQ8Ffn) { "0" } else { "1" }
+        $env:VIENEU_ACOUSTIC_GGML_HEADS = if ($GgmlHeads) { "1" } else { "0" }
+        $env:VIENEU_GGML_FUSE_FFN = if ($FuseFfn) { "1" } else { "0" }
+        $env:VIENEU_ACOUSTIC_Q8_FFN = if ($Q8Ffn) { "1" } else { "0" }
 
         Write-Step "Running vieneu-v3-native benchmark"
         $displayArgs = $argsList -join " "
