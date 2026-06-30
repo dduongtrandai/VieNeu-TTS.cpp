@@ -2,3 +2,6 @@
 	path = third_party/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp.git
 	branch = master
+[submodule "third_party/sea-g2p"]
+	path = third_party/sea-g2p
+	url = https://github.com/dduongtrandai/sea-g2p.git
