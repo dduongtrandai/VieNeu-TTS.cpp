@@ -5,7 +5,7 @@ param(
     [string]$RefAudio = "",
     [string]$Output = "outputs\vieneu-v3-native-benchmark.wav",
     [string]$Log = "outputs\vieneu-v3-native-benchmark.log",
-    [int]$MaxNewFrames = 150,
+    [int]$MaxNewFrames = 300,
     [float]$Temperature = 0.8,
     [int]$TopK = 25,
     [float]$TopP = 0.95,

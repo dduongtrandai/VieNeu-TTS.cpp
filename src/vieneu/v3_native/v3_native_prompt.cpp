@@ -90,11 +90,71 @@ static std::vector<std::string> split_long_text_part(const std::string& text, si
     return chunks;
 }
 
+static std::string normalize_emotion_key(std::string inner) {
+    while (!inner.empty() && is_space_char(inner.front())) {
+        inner.erase(inner.begin());
+    }
+    while (!inner.empty() && is_space_char(inner.back())) {
+        inner.pop_back();
+    }
+    std::transform(inner.begin(), inner.end(), inner.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return inner;
+}
+
+static bool emotion_token_for_key(const std::string& key, std::string& token) {
+    if (key == "chuckle" || key == "cuoi" || key == u8"cười" ||
+        key == "sigh" || key == "tho dai" || key == u8"thở dài" ||
+        key == "clear throat" || key == "hang giong" || key == u8"hắng giọng") {
+        if (key == "chuckle" || key == "cuoi" || key == u8"cười") {
+            token = "<|emotion_1|>";
+        } else if (key == "sigh" || key == "tho dai" || key == u8"thở dài") {
+            token = "<|emotion_2|>";
+        } else {
+            token = "<|emotion_3|>";
+        }
+        return true;
+    }
+    return false;
+}
+
+static std::string canonicalize_emotion_markers(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        if (text.compare(i, 10, "<|emotion_") == 0) {
+            const size_t end = text.find("|>", i + 10);
+            if (end != std::string::npos) {
+                out.append(text, i, end + 2 - i);
+                i = end + 2;
+                continue;
+            }
+        }
+        if (text[i] == '[') {
+            const size_t end = text.find(']', i + 1);
+            if (end != std::string::npos) {
+                std::string token;
+                const std::string key = normalize_emotion_key(text.substr(i + 1, end - i - 1));
+                if (emotion_token_for_key(key, token)) {
+                    out += token;
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push_back(text[i]);
+        ++i;
+    }
+    return out;
+}
+
 std::vector<std::string> chunk_text_v3(const std::string& text, int max_chars_value) {
     const size_t max_chars = static_cast<size_t>((std::max)(16, max_chars_value));
     std::vector<std::string> chunks;
     std::string current;
     std::string sentence;
+    const std::string canonical_text = canonicalize_emotion_markers(text);
 
     auto flush_current = [&]() {
         std::string item = trim_copy(current);
@@ -144,7 +204,7 @@ std::vector<std::string> chunk_text_v3(const std::string& text, int max_chars_va
         append_joined(current, part);
     };
 
-    for (char c : text) {
+    for (char c : canonical_text) {
         sentence.push_back(c);
         if (c == '.' || c == '!' || c == '?' || c == '\n' || c == '\r') {
             add_part(sentence);

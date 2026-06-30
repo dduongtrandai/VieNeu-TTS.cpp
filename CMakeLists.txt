@@ -202,4 +202,10 @@ if(BUILD_TESTING)
     target_link_libraries(test-vieneu-phonemizer PRIVATE vieneu-tts-core)
     add_test(NAME vieneu-phonemizer COMMAND test-vieneu-phonemizer)
 
+    add_executable(test-v3-native-chunking
+        tests/v3-native-chunking.cpp
+    )
+    target_link_libraries(test-v3-native-chunking PRIVATE vieneu-tts-core)
+    add_test(NAME v3-native-chunking COMMAND test-v3-native-chunking)
+
 endif()

@@ -46,19 +46,6 @@ static bool contains_v3_emotion_token(const std::string& text) {
            text.find("<|emotion_3|>") != std::string::npos;
 }
 
-static int effective_chunk_chars_for_frame_budget(int requested_max_chars, int max_new_frames) {
-    const int max_chars = (std::max)(16, requested_max_chars);
-    if (max_new_frames <= 0) {
-        return max_chars;
-    }
-
-    // max_new_frames is applied per chunk. If a long text chunk is allowed to be
-    // much larger than the frame budget, generation can hit the frame cap before
-    // EOS and the resulting audio sounds like it skipped the tail of the text.
-    const int frame_limited_chars = (std::max)(64, max_new_frames);
-    return (std::min)(max_chars, frame_limited_chars);
-}
-
 VieneuV3NativeEngine::VieneuV3NativeEngine() {}
 
 VieneuV3NativeEngine::~VieneuV3NativeEngine() {}
@@ -152,10 +139,7 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
         return false;
     }
 
-    // Chunk text. Keep chunk size in sympathy with the per-chunk frame budget so
-    // explicit low --max-new-frames values do not silently truncate long chunks.
-    const int effective_max_chars = effective_chunk_chars_for_frame_budget(params.max_chars, params.max_new_frames);
-    const std::vector<std::string> chunks = chunk_text_v3(params.text, effective_max_chars);
+    const std::vector<std::string> chunks = chunk_text_v3(params.text, params.max_chars);
     if (chunks.empty()) {
         error = "Text chunking produced no text chunks.";
         return false;
