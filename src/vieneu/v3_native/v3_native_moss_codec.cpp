@@ -205,6 +205,7 @@ bool V3NativeMossCodec::initialize(const V3CodecParams& params, std::string& err
         session_options_ = std::make_unique<Ort::SessionOptions>();
         session_options_->SetIntraOpNumThreads(params.n_threads);
         session_options_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        n_vq_ = params.n_vq > 0 ? params.n_vq : 16;
 
         std::string decode_path = join_paths(params.codec_dir, "moss_audio_tokenizer_decode_full.onnx");
         std::string encode_path = join_paths(params.codec_dir, "moss_audio_tokenizer_encode.onnx");
@@ -262,7 +263,12 @@ bool V3NativeMossCodec::decode(const std::vector<int32_t>& codes, int64_t frame_
         Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         
         std::vector<int32_t> lengths = {static_cast<int32_t>(frame_count)};
-        std::vector<int64_t> codes_shape = {1, frame_count, 16};
+        if (static_cast<int64_t>(codes.size()) != frame_count * n_vq_) {
+            error = "MOSS codec decode code count does not match frame_count * n_vq.";
+            return false;
+        }
+
+        std::vector<int64_t> codes_shape = {1, frame_count, n_vq_};
         std::vector<int64_t> len_shape = {1};
 
         if (decode_in_names_.size() != 2 || decode_out_names_.empty()) {
@@ -310,23 +316,34 @@ bool V3NativeMossCodec::decode(const std::vector<int32_t>& codes, int64_t frame_
 }
 
 bool V3NativeMossCodec::encode(const std::vector<float>& waveform, std::vector<int64_t>& out_codes, std::string& error) {
+    const int64_t frames = static_cast<int64_t>(waveform.size());
+    if (frames <= 0) {
+        error = "MOSS codec encode received an empty waveform.";
+        return false;
+    }
+    std::vector<float> stereo(static_cast<size_t>(2 * frames), 0.0f);
+    std::copy(waveform.begin(), waveform.end(), stereo.begin());
+    std::copy(waveform.begin(), waveform.end(), stereo.begin() + frames);
+    return encode_stereo(stereo, frames, out_codes, error);
+}
+
+bool V3NativeMossCodec::encode_stereo(const std::vector<float>& stereo_waveform, int64_t frame_count, std::vector<int64_t>& out_codes, std::string& error) {
     // encode is not required for synthesis preset voice. It is only required for voice cloning.
     // However we implement it using moss_audio_tokenizer_encode.onnx.
+    out_codes.clear();
     if (!encode_session_) {
         error = "MOSS Codec encode session is not initialized.";
+        return false;
+    }
+    if (frame_count <= 0 || static_cast<int64_t>(stereo_waveform.size()) != frame_count * 2) {
+        error = "MOSS codec encode received invalid stereo waveform shape.";
         return false;
     }
     try {
         Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        int64_t frames = static_cast<int64_t>(waveform.size());
-        // Map mono input to stereo shape [1, 2, frames] for the encoder. We copy the mono channel to both stereo channels.
-        std::vector<float> stereo(static_cast<size_t>(2 * frames), 0.0f);
-        std::copy(waveform.begin(), waveform.end(), stereo.begin());
-        std::copy(waveform.begin(), waveform.end(), stereo.begin() + frames);
-
-        std::vector<int32_t> lengths = {static_cast<int32_t>(frames)};
-        std::vector<int64_t> wav_shape = {1, 2, frames};
+        std::vector<int32_t> lengths = {static_cast<int32_t>(frame_count)};
+        std::vector<int64_t> wav_shape = {1, 2, frame_count};
         std::vector<int64_t> len_shape = {1};
 
         if (encode_in_names_.size() != 2 || encode_out_names_.empty()) {
@@ -335,7 +352,12 @@ bool V3NativeMossCodec::encode(const std::vector<float>& waveform, std::vector<i
         }
 
         std::vector<Ort::Value> inputs;
-        inputs.emplace_back(Ort::Value::CreateTensor<float>(mem, stereo.data(), stereo.size(), wav_shape.data(), wav_shape.size()));
+        inputs.emplace_back(Ort::Value::CreateTensor<float>(
+            mem,
+            const_cast<float*>(stereo_waveform.data()),
+            stereo_waveform.size(),
+            wav_shape.data(),
+            wav_shape.size()));
         inputs.emplace_back(Ort::Value::CreateTensor<int32_t>(mem, lengths.data(), lengths.size(), len_shape.data(), len_shape.size()));
 
         auto out = encode_session_->Run(
@@ -371,23 +393,23 @@ bool V3NativeMossCodec::encode(const std::vector<float>& waveform, std::vector<i
             return false;
         }
 
-        if (shape[0] == 1 && shape[2] == 16) {
+        if (shape[0] == 1 && shape[2] == n_vq_) {
             out_codes = std::move(raw);
-        } else if (shape[0] == 16 && shape[1] == 1) {
+        } else if (shape[0] == n_vq_ && shape[1] == 1) {
             const int64_t num_frames = shape[2];
-            out_codes.resize(static_cast<size_t>(num_frames * 16));
-            for (int ch = 0; ch < 16; ++ch) {
+            out_codes.resize(static_cast<size_t>(num_frames * n_vq_));
+            for (int ch = 0; ch < n_vq_; ++ch) {
                 for (int64_t t = 0; t < num_frames; ++t) {
-                    out_codes[static_cast<size_t>(t * 16 + ch)] =
+                    out_codes[static_cast<size_t>(t * n_vq_ + ch)] =
                         raw[static_cast<size_t>(ch * num_frames + t)];
                 }
             }
-        } else if (shape[0] == 1 && shape[1] == 16) {
+        } else if (shape[0] == 1 && shape[1] == n_vq_) {
             const int64_t num_frames = shape[2];
-            out_codes.resize(static_cast<size_t>(num_frames * 16));
-            for (int ch = 0; ch < 16; ++ch) {
+            out_codes.resize(static_cast<size_t>(num_frames * n_vq_));
+            for (int ch = 0; ch < n_vq_; ++ch) {
                 for (int64_t t = 0; t < num_frames; ++t) {
-                    out_codes[static_cast<size_t>(t * 16 + ch)] =
+                    out_codes[static_cast<size_t>(t * n_vq_ + ch)] =
                         raw[static_cast<size_t>(ch * num_frames + t)];
                 }
             }

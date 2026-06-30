@@ -100,6 +100,7 @@ bool VieneuV3NativeEngine::initialize(const VieneuV3NativeInit& init, std::strin
         V3CodecParams codec_params;
         codec_params.codec_dir = init.codec_dir;
         codec_params.n_threads = init.n_threads;
+        codec_params.n_vq = config_.n_vq;
         if (!codec_.initialize(codec_params, error)) {
             return false;
         }
@@ -123,6 +124,10 @@ bool VieneuV3NativeEngine::initialize(const VieneuV3NativeInit& init, std::strin
                 if (item.contains("codes") && item.at("codes").is_array()) {
                     const auto& codes = item.at("codes");
                     for (const auto& row : codes) {
+                        if (!row.is_array() || static_cast<int>(row.size()) != config_.n_vq) {
+                            error = "VieNeu v3 native preset voice has invalid codes shape: " + id;
+                            return false;
+                        }
                         for (const auto& v : row) {
                             preset.codes.push_back(v.get<int64_t>());
                         }
@@ -157,29 +162,28 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
 
     out_audio.clear();
 
-    // Resolve voice preset
-    VoicePreset voice_preset;
-    if (!resolve_voice_preset(params.voice_id, voice_preset, error)) {
-        return false;
-    }
-
-    // Resolve reference voice coding
     std::vector<int64_t> ref_codes;
-    const std::vector<int64_t>* p_ref_codes = nullptr;
+    int leading_token = config_.emotion_0_token_id;
     if (!params.ref_audio_path.empty()) {
         if (!encode_reference(params.ref_audio_path, ref_codes, error)) {
             return false;
         }
-        p_ref_codes = &ref_codes;
-    } else if (voice_preset.found && !voice_preset.codes.empty()) {
-        p_ref_codes = &voice_preset.codes;
+    } else {
+        VoicePreset voice_preset;
+        if (!resolve_voice_preset(params.voice_id, voice_preset, error)) {
+            return false;
+        }
+        if (voice_preset.has_reserved_id) {
+            leading_token = voice_preset.reserved_id;
+        }
+        if (!voice_preset.codes.empty()) {
+            ref_codes = std::move(voice_preset.codes);
+        }
     }
 
-    // Resolve leading speaker token
-    int leading_token = 16; // default fallback
-    int reserved_id = 0;
-    if (parse_voice_reserved_id(params.voice_id.empty() ? default_voice_id_ : params.voice_id, reserved_id)) {
-        leading_token = reserved_id;
+    if (!ref_codes.empty() && ref_codes.size() % static_cast<size_t>(config_.n_vq) != 0) {
+        error = "VieNeu v3 native reference codes are not divisible by n_vq.";
+        return false;
     }
 
     const int silence_samples = static_cast<int>(std::lround(static_cast<double>(sample_rate()) * 0.15));
@@ -198,7 +202,13 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
             std::cerr << "\n";
         }
         std::vector<float> chunk_audio;
-        if (!synthesize_phonemes(phonemes, p_ref_codes, leading_token, params, chunk_audio, error)) {
+        if (!synthesize_phonemes(
+                phonemes,
+                ref_codes.empty() ? nullptr : &ref_codes,
+                leading_token,
+                params,
+                chunk_audio,
+                error)) {
             if (chunks.size() > 1) {
                 error += " (chunk " + std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + ")";
             }
@@ -472,6 +482,7 @@ static bool local_read_wav_file(const std::string& path, LocalWavData& wav, std:
 }
 
 bool VieneuV3NativeEngine::encode_reference(const std::string& ref_audio_path, std::vector<int64_t>& out_codes, std::string& error) {
+    out_codes.clear();
     LocalWavData wav;
     if (!local_read_wav_file(ref_audio_path, wav, error)) {
         return false;
@@ -487,8 +498,7 @@ bool VieneuV3NativeEngine::encode_reference(const std::string& ref_audio_path, s
         return false;
     }
 
-    // Resample to target mono/stereo waveform (reusing resampler logic)
-    std::vector<float> resampled(static_cast<size_t>(out_frames), 0.0f);
+    std::vector<float> stereo(static_cast<size_t>(2 * out_frames), 0.0f);
     for (int64_t i = 0; i < out_frames; ++i) {
         const double src_pos = wav.sample_rate == target_sr
             ? static_cast<double>(i)
@@ -496,20 +506,15 @@ bool VieneuV3NativeEngine::encode_reference(const std::string& ref_audio_path, s
         const int64_t i0 = (std::min)(static_cast<int64_t>(std::floor(src_pos)), in_frames - 1);
         const int64_t i1 = (std::min)(i0 + 1, in_frames - 1);
         const float frac = static_cast<float>(src_pos - static_cast<double>(i0));
-        
-        // Sum/average channels to mono, then interpolate
-        float sum_val_0 = 0.0f;
-        float sum_val_1 = 0.0f;
-        for (int c = 0; c < wav.channels; ++c) {
-            sum_val_0 += wav.samples[static_cast<size_t>(i0 * wav.channels + c)];
-            sum_val_1 += wav.samples[static_cast<size_t>(i1 * wav.channels + c)];
+        for (int c = 0; c < 2; ++c) {
+            const int src_c = wav.channels == 1 ? 0 : (std::min)(c, wav.channels - 1);
+            const float a = wav.samples[static_cast<size_t>(i0 * wav.channels + src_c)];
+            const float b = wav.samples[static_cast<size_t>(i1 * wav.channels + src_c)];
+            stereo[static_cast<size_t>(c * out_frames + i)] = a + (b - a) * frac;
         }
-        float val0 = sum_val_0 / static_cast<float>(wav.channels);
-        float val1 = sum_val_1 / static_cast<float>(wav.channels);
-        resampled[static_cast<size_t>(i)] = val0 + (val1 - val0) * frac;
     }
 
-    return codec_.encode(resampled, out_codes, error);
+    return codec_.encode_stereo(stereo, out_frames, out_codes, error);
 }
 
 std::string VieneuV3NativeEngine::phonemize_for_v3(const std::string& text) const {

@@ -9,6 +9,7 @@
 struct V3CodecParams {
     std::string codec_dir;
     int n_threads = 4;
+    int n_vq = 16;
 };
 
 class V3NativeMossCodec {
@@ -19,17 +20,19 @@ public:
     bool initialize(const V3CodecParams& params, std::string& error);
     void free_resources();
 
-    // Decode generated codes (shape: T * 16) to mono waveform
+    // Decode generated codes (shape: T * n_vq) to mono waveform
     bool decode(const std::vector<int32_t>& codes, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
 
-    // Encode mono waveform to reference codes (shape: T * 16)
+    // Encode mono waveform to reference codes (shape: T * n_vq)
     bool encode(const std::vector<float>& waveform, std::vector<int64_t>& out_codes, std::string& error);
+    bool encode_stereo(const std::vector<float>& stereo_waveform, int64_t frame_count, std::vector<int64_t>& out_codes, std::string& error);
 
 private:
     std::shared_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::SessionOptions> session_options_;
     std::unique_ptr<Ort::Session> decode_session_;
     std::unique_ptr<Ort::Session> encode_session_;
+    int n_vq_ = 16;
 
     std::vector<std::string> decode_in_names_;
     std::vector<std::string> decode_out_names_;

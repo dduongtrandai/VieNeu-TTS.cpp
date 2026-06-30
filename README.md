@@ -123,6 +123,27 @@ Use the compiled CLI tool to synthesize text into a WAV file:
   --output "hello.wav"
 ```
 
+### VieNeu v3 Native Voice Cloning Test
+
+The repo includes the same reference clips used by the original VieNeu-TTS UI in
+`examples/audio_ref`. The script uses `scripts\v3-native-benchmark-text.txt` by
+default, enables native benchmark logging, and writes one output per reference.
+After building with `scripts/build-local.ps1`, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run-v3-native-voice-clone-test.ps1 -NoBuild
+```
+
+To test one reference only:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run-v3-native-voice-clone-test.ps1 -NoBuild -Ref example_3
+```
+
+Generated WAV files are written to `outputs\voice-clone` by default.
+Benchmark logs are written to `outputs\voice-clone\logs`. Use `-Text "..."` or
+`-TextFile path\to\text.txt` to override the benchmark text.
+
 ### 2. C ABI Integration Code Example
 
 Below is a minimal C snippet demonstrating how to load the DLL/so and generate audio:
