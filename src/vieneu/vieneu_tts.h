@@ -42,6 +42,17 @@ struct vieneu_audio {
 
 struct vieneu_context;
 
+struct vieneu_progress {
+    int          abi_version;
+    const char * stage;
+    int          current;
+    int          total;
+    float        progress;
+    const char * message;
+};
+
+typedef void (*vieneu_progress_callback)(const struct vieneu_progress * progress, void * user_data);
+
 struct vieneu_tts_params {
     int           abi_version;
     const char *  text;
@@ -90,6 +101,7 @@ VIENEU_API void vieneu_audio_free(struct vieneu_audio * a);
 VIENEU_API void vieneu_init_default_params(struct vieneu_init_params * p);
 VIENEU_API struct vieneu_context * vieneu_init(const struct vieneu_init_params * params);
 VIENEU_API void vieneu_free(struct vieneu_context * vieneu);
+VIENEU_API void vieneu_set_progress_callback(struct vieneu_context * vieneu, vieneu_progress_callback callback, void * user_data);
 
 VIENEU_API void vieneu_tts_default_params(struct vieneu_tts_params * p);
 VIENEU_API int vieneu_synthesize(struct vieneu_context * vieneu, const struct vieneu_tts_params * params, struct vieneu_audio * out);

@@ -7,7 +7,6 @@
 #include <cctype>
 #include <cstdlib>
 #include <string>
-#include <unordered_set>
 #include <vector>
 #include <stdexcept>
 
@@ -39,7 +38,7 @@ public:
                         int top_k,
                         float top_p,
                         float repetition_penalty,
-                        std::vector<std::unordered_set<int>>& history,
+                        std::vector<V3RepetitionHistory>& history,
                         std::vector<int64_t>& codes,
                         bool& eos,
                         std::string& error) override {
@@ -137,7 +136,7 @@ bool VieneuV3OnnxEngine::acoustic_frame(
     int top_k,
     float top_p,
     float repetition_penalty,
-    std::vector<std::unordered_set<int>>& history,
+    std::vector<V3RepetitionHistory>& history,
     std::vector<int64_t>& codes,
     bool& eos,
     std::string& error) {
@@ -163,7 +162,7 @@ bool VieneuV3OnnxEngine::acoustic_frame_onnx(
     int top_k,
     float top_p,
     float repetition_penalty,
-    std::vector<std::unordered_set<int>>& history,
+    std::vector<V3RepetitionHistory>& history,
     std::vector<int64_t>& codes,
     bool& eos,
     std::string& error) {
@@ -215,9 +214,9 @@ bool VieneuV3OnnxEngine::acoustic_frame_onnx(
         auto sample_channel = [&](int ch, const float* vec) {
             const float* head = audio_emb_t_.data.data() + static_cast<int64_t>(ch) * audio_emb_t_.dim1 * audio_emb_t_.dim2;
             matvec_transposed(vec, head, audio_emb_t_.dim1, audio_emb_t_.dim2, acoustic_logits_);
-            std::unordered_set<int>* prev = history.empty() ? nullptr : &history[static_cast<size_t>(ch)];
+            V3RepetitionHistory* prev = history.empty() ? nullptr : &history[static_cast<size_t>(ch)];
             int64_t code = sample_logits(acoustic_logits_, temperature, top_k, top_p, repetition_penalty, prev);
-            if (prev) prev->insert(static_cast<int>(code));
+            if (prev) prev->add(static_cast<int32_t>(code));
             return code;
         };
 

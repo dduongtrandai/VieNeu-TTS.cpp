@@ -1,0 +1,25 @@
+{
+  "source": "VieNeu-TTS/examples/audio_ref",
+  "refs": [
+    {
+      "id": "example",
+      "audio": "example.wav",
+      "text": "Ví dụ 2. Tính trung bình của dãy số."
+    },
+    {
+      "id": "example_2",
+      "audio": "example_2.wav",
+      "text": "Trên thực tế, các nghi ngờ đã bắt đầu xuất hiện."
+    },
+    {
+      "id": "example_3",
+      "audio": "example_3.wav",
+      "text": "Cậu có nhìn thấy không?"
+    },
+    {
+      "id": "example_4",
+      "audio": "example_4.wav",
+      "text": "Tết là dịp mọi người háo hức đón chào một năm mới với nhiều hy vọng và mong ước."
+    }
+  ]
+}

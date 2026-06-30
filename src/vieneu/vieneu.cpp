@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
@@ -443,6 +444,60 @@ static bool try_python_vieneu_phonemizer(const std::string& text, std::string& o
     return false;
 }
 
+static std::string ascii_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+static bool consume_emotion_marker(const std::string& text, size_t pos, std::string& token, size_t& consumed) {
+    if (text.compare(pos, 10, "<|emotion_") == 0) {
+        const size_t end = text.find("|>", pos + 10);
+        if (end != std::string::npos) {
+            token = text.substr(pos, end + 2 - pos);
+            consumed = token.size();
+            return true;
+        }
+    }
+
+    if (pos >= text.size() || text[pos] != '[') {
+        return false;
+    }
+    const size_t end = text.find(']', pos + 1);
+    if (end == std::string::npos) {
+        return false;
+    }
+
+    std::string inner = text.substr(pos + 1, end - pos - 1);
+    while (!inner.empty() && std::isspace(static_cast<unsigned char>(inner.front()))) {
+        inner.erase(inner.begin());
+    }
+    while (!inner.empty() && std::isspace(static_cast<unsigned char>(inner.back()))) {
+        inner.pop_back();
+    }
+    const std::string key = ascii_lower_copy(inner);
+    if (key == "chuckle" || key == "cuoi" || key == u8"cười") {
+        token = "<|emotion_1|>";
+    } else if (key == "sigh" || key == "tho dai" || key == u8"thở dài") {
+        token = "<|emotion_2|>";
+    } else if (key == "clear throat" || key == "hang giong" || key == u8"hắng giọng") {
+        token = "<|emotion_3|>";
+    } else {
+        return false;
+    }
+    consumed = end + 1 - pos;
+    return true;
+}
+
+static void append_emotion_token(std::stringstream& ss, const std::string& token) {
+    const std::streampos pos = ss.tellp();
+    if (pos > 0) {
+        ss << ' ';
+    }
+    ss << token;
+}
+
 std::string VieneuProfile::format_prompt(const std::string& phonemes) {
     return "<|speaker_16|><|TEXT_PROMPT_START|>" + phonemes + "<|TEXT_PROMPT_END|><|SPEECH_GENERATION_START|>";
 }
@@ -672,6 +727,18 @@ std::string VieneuProfile::phonemize(const std::string& text) {
 
     // Syllabify text
     for (size_t i = 0; i < text.size(); ++i) {
+        std::string emotion_token;
+        size_t emotion_consumed = 0;
+        if (consume_emotion_marker(text, i, emotion_token, emotion_consumed)) {
+            if (!word.empty()) {
+                ss << process_single_word(word);
+                word = "";
+            }
+            append_emotion_token(ss, emotion_token);
+            i += emotion_consumed - 1;
+            continue;
+        }
+
         char c = text[i];
         if (is_punc(c)) {
             if (!word.empty()) {
@@ -705,21 +772,27 @@ bool VieneuProfile::synthesize(
     int top_k,
     int max_tokens,
     bool skip_phonemize,
-    std::vector<float>& out_audio)
+    std::vector<float>& out_audio,
+    const VieneuProgressFn& progress)
 {
     out_audio.clear();
+    vieneu_report_progress(progress, "prepare", 0, 0, 0.0f, "Preparing v2 synthesis.");
 
     std::string phonemes = text;
     if (!skip_phonemize) {
+        vieneu_report_progress(progress, "phonemize", 0, 1, 0.02f, "Phonemizing input text.");
         phonemes = phonemize(text);
+        vieneu_report_progress(progress, "phonemize", 1, 1, 0.05f, "Phonemization complete.");
     }
 
     std::string prompt = format_prompt(phonemes);
     auto prompt_tokens = llama.tokenize(prompt, true);
 
+    vieneu_report_progress(progress, "prefill", 0, 1, 0.06f, "Running prompt prefill.");
     if (!llama.decode(prompt_tokens, 0, true)) {
         return false;
     }
+    vieneu_report_progress(progress, "prefill", 1, 1, 0.10f, "Prompt prefill complete.");
 
     std::string generated_text = "";
     llama_token curr_token = 0;
@@ -744,6 +817,8 @@ bool VieneuProfile::synthesize(
         }
 
         n_tokens++;
+        const float token_progress = max_tokens > 0 ? static_cast<float>(n_tokens) / static_cast<float>(max_tokens) : 0.0f;
+        vieneu_report_progress(progress, "generate_tokens", n_tokens, max_tokens, 0.10f + token_progress * 0.75f, "Generating speech tokens.");
     }
 
     auto speech_ids = extract_speech_ids(generated_text);
@@ -756,10 +831,12 @@ bool VieneuProfile::synthesize(
     std::vector<int64_t> speech_ids_int64(speech_ids.begin(), speech_ids.end());
 
     std::vector<float> chunk_audio;
+    vieneu_report_progress(progress, "decode_audio", 0, 1, 0.90f, "Decoding speech tokens to audio.");
     if (!decoder.decode_vieneu(speech_ids_int64, voice_embedding, chunk_audio)) {
         return false;
     }
 
     out_audio = std::move(chunk_audio);
+    vieneu_report_progress(progress, "complete", 1, 1, 1.0f, "Synthesis complete.");
     return true;
 }

@@ -236,12 +236,12 @@ bool VieneuV3OnnxEngine::initialize(const VieneuV3OnnxInit& init, std::string& e
 
     env_ = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "VieneuV3Onnx");
     session_options_ = std::make_unique<Ort::SessionOptions>();
-    int threads_to_use = env_int("VIENEU_ORT_THREADS", init.n_threads);
-    if (threads_to_use <= 0) {
+    threads_to_use_ = env_int("VIENEU_ORT_THREADS", init.n_threads);
+    if (threads_to_use_ <= 0) {
         unsigned int hardware_threads = std::thread::hardware_concurrency();
-        threads_to_use = hardware_threads > 0 ? (std::max)(1, static_cast<int>((std::min)(hardware_threads / 2, 4u))) : 4;
+        threads_to_use_ = hardware_threads > 0 ? (std::max)(1, static_cast<int>((std::min)(hardware_threads / 2, 4u))) : 4;
     }
-    session_options_->SetIntraOpNumThreads(threads_to_use);
+    session_options_->SetIntraOpNumThreads(threads_to_use_);
     const int inter_op_threads = env_int("VIENEU_ORT_INTER_OP_THREADS", 1);
     session_options_->SetInterOpNumThreads((std::max)(1, inter_op_threads));
     const std::string execution_mode = lowercase(getenv_string("VIENEU_ORT_EXECUTION_MODE"));
@@ -319,6 +319,10 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
     std::string& error) {
     out_audio.clear();
     reset_benchmark_stats();
+    auto scaled_progress = [&params](float local) {
+        return params.progress_base + local * params.progress_span;
+    };
+    vieneu_report_progress(params.progress, "prefill", 0, 1, scaled_progress(0.10f), "Running v3 ONNX prompt prefill.");
     const PromptRows rows = build_rows(phonemes, ref_codes, leading_token);
     std::vector<float> prompt_embeds = embed_rows(rows);
     std::vector<int64_t> prompt_shape = {1, rows.rows, config_.hidden_size};
@@ -346,6 +350,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             benchmark_stats_.prefill_ms += std::chrono::duration<double, std::milli>(prefill_end - prefill_start).count();
             benchmark_stats_.prefill_calls += 1;
         }
+        vieneu_report_progress(params.progress, "prefill", 1, 1, scaled_progress(0.18f), "V3 ONNX prompt prefill complete.");
         const float* hidden_data = pre[0].GetTensorData<float>();
         std::vector<Ort::Value> past_k;
         std::vector<Ort::Value> past_v;
@@ -368,9 +373,12 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             return false;
         }
 
-        std::vector<std::unordered_set<int>> history;
+        std::vector<V3RepetitionHistory> history;
         if (std::fabs(params.repetition_penalty - 1.0f) > 1e-6f) {
             history.resize(static_cast<size_t>(config_.n_vq));
+            for (auto& item : history) {
+                item.initialize(static_cast<size_t>(config_.audio_vocab_size));
+            }
         }
         std::vector<int32_t> frames;
         const int max_frames = (std::max)(1, params.max_new_frames);
@@ -389,6 +397,13 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             for (int64_t code : codes) {
                 frames.push_back(static_cast<int32_t>(code));
             }
+            vieneu_report_progress(
+                params.progress,
+                "generate_frames",
+                t + 1,
+                max_frames,
+                scaled_progress(0.18f + (static_cast<float>(t + 1) / static_cast<float>(max_frames)) * 0.68f),
+                "Generating v3 ONNX acoustic frames.");
             if (eos) {
                 break;
             }
@@ -441,7 +456,11 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
             print_benchmark_stats();
             return false;
         }
+        vieneu_report_progress(params.progress, "decode_audio", 0, 1, scaled_progress(0.90f), "Decoding v3 ONNX frames to audio.");
         const bool ok = decode_codes(frames, static_cast<int64_t>(frames.size() / config_.n_vq), out_audio, error);
+        if (ok) {
+            vieneu_report_progress(params.progress, "decode_audio", 1, 1, scaled_progress(0.96f), "V3 ONNX audio decode complete.");
+        }
         print_benchmark_stats();
         return ok;
     } catch (const std::exception& e) {
@@ -453,6 +472,7 @@ bool VieneuV3OnnxEngine::synthesize_phonemes(
 
 bool VieneuV3OnnxEngine::synthesize(const VieneuV3OnnxParams& params, std::vector<float>& out_audio, std::string& error) {
     out_audio.clear();
+    vieneu_report_progress(params.progress, "prepare", 0, 0, 0.0f, "Preparing v3 ONNX synthesis.");
     if (!initialized_) {
         error = "VieNeu v3 ONNX engine is not initialized.";
         return false;
@@ -494,13 +514,23 @@ bool VieneuV3OnnxEngine::synthesize(const VieneuV3OnnxParams& params, std::vecto
 
     const int silence_samples = static_cast<int>(std::lround(static_cast<double>(sample_rate()) * 0.15));
     for (size_t i = 0; i < chunks.size(); ++i) {
+        vieneu_report_progress(
+            params.progress,
+            "chunk",
+            static_cast<int>(i),
+            static_cast<int>(chunks.size()),
+            chunks.empty() ? 0.0f : static_cast<float>(i) / static_cast<float>(chunks.size()),
+            "Starting v3 ONNX text chunk.");
         const std::string phonemes = phonemize_for_v3(chunks[i]);
         std::vector<float> chunk_audio;
+        VieneuV3OnnxParams chunk_params = params;
+        chunk_params.progress_base = static_cast<float>(i) / static_cast<float>(chunks.size());
+        chunk_params.progress_span = 1.0f / static_cast<float>(chunks.size());
         if (!synthesize_phonemes(
                 phonemes,
                 ref_codes.empty() ? nullptr : &ref_codes,
                 leading_token,
-                params,
+                chunk_params,
                 chunk_audio,
                 error)) {
             if (chunks.size() > 1) {
@@ -515,10 +545,18 @@ bool VieneuV3OnnxEngine::synthesize(const VieneuV3OnnxParams& params, std::vecto
             out_audio.insert(out_audio.end(), static_cast<size_t>(silence_samples), 0.0f);
         }
         out_audio.insert(out_audio.end(), chunk_audio.begin(), chunk_audio.end());
+        vieneu_report_progress(
+            params.progress,
+            "chunk",
+            static_cast<int>(i + 1),
+            static_cast<int>(chunks.size()),
+            static_cast<float>(i + 1) / static_cast<float>(chunks.size()),
+            "Finished v3 ONNX text chunk.");
     }
     if (out_audio.empty()) {
         error = "VieNeu v3 synthesis produced empty audio.";
         return false;
     }
+    vieneu_report_progress(params.progress, "complete", 1, 1, 1.0f, "V3 ONNX synthesis complete.");
     return true;
 }

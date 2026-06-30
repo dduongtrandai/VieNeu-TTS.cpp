@@ -1,178 +1,208 @@
-# vieneu-tts.cpp
+# VieNeu-TTS.cpp
 
-A native, high-performance C++ inference engine for the VieNeu-TTS model family.
+Native C++ runtime for [VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS), focused on local Vietnamese text-to-speech inference, voice presets, and zero-shot voice cloning.
 
-`vieneu-tts.cpp` packages llama.cpp (for v2 GGUF Speech LM inference) and ONNX Runtime (for neural encoder/decoder and v3 single-utterance inference) into a unified C++ orchestration layer. It exposes a clean, stable **C ABI** (`vieneu_tts.h`) that allows easy integration into other languages/applications (such as LA Studio, Python wrappers, or Rust bindings).
+[Model on Hugging Face](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) · [Original VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · [ONNX Runtime](https://onnxruntime.ai/)
 
----
+## Highlights
 
-## Key Features
-- **High-Performance Inference**: Tailored for CPU and GPU acceleration by combining `llama.cpp`'s matrix operations and `ONNX Runtime`.
-- **Stable C ABI**: Clean API surface designed for cross-language compatibility (pure C99 compatible).
-- **Dynamic Model Loading**: Dynamically initialize pipelines with different combinations of GGUF model files, ONNX encoders, and decoders.
-- **Zero-Shot Voice Cloning**: Encode speaker embeddings from a reference audio file dynamically to perform instant cloning.
-- **Low Footprint**: Minimal overhead, low memory utilization, and multi-thread optimizations.
+- Native C++17 implementation with a small CLI and a stable C ABI.
+- VieNeu v3 ONNX pipeline for convenient local inference.
+- VieNeu v3 native path using `llama.cpp` for the backbone and native acoustic weights.
+- Voice presets through `voices_v3_turbo.json`.
+- Zero-shot voice cloning from a reference WAV file.
+- Windows helper scripts for building, downloading runtime assets, and running smoke tests.
 
----
+## Models
 
-## Directory Structure
-- `src/`
-  - `vieneu/`: Entry points implementing the stable C ABI wrapper (`vieneu_tts.h` / `vieneu_tts.cpp`) and VieNeu profiles/engines.
-  - `codecs/`: ONNX Runtime helpers for neural speech encoders/decoders (e.g. NeuCodec).
-  - `backends/`: Wrap `llama.cpp` for parsing GGUF models and generating speech tokens.
-- `tools/`
-  - `vieneu-tts-cli.cpp`: A command-line utility for standalone TTS generation and smoke tests.
-- `tests/`
-  - `abi-c.c`: A C99 source file to verify that the C ABI header can compile cleanly without C++ extensions.
+Download the model assets from Hugging Face:
 
----
+- VieNeu v3 Turbo: [pnnbao-ump/VieNeu-TTS-v3-Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo)
+- MOSS audio tokenizer ONNX codec: [OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX)
 
-## Prerequisites & Dependencies
+The convenience script `scripts/run-v3-tts-test.ps1` downloads the required v3 ONNX assets into `.models/vieneu-v3-turbo` automatically. Native v3 assets such as `backbone.gguf`, `vieneu_v3_heads.npz`, and `acoustic/vieneu_acoustic_weights.npz` can be exported with the scripts in `scripts/`.
 
-To build `vieneu-tts.cpp`, you will need:
-- A C++17 compatible compiler (MSVC, GCC, or Clang)
-- CMake (version 3.14 or higher)
-- **llama.cpp**: Source code must be placed in a directory sibling to this repository, or customize its path using `-DVIENEU_LLAMA_DIR`.
-- **ONNX Runtime**: The prebuilt C/C++ SDK library and headers.
+## Build
 
----
+Requirements:
 
-## Build Instructions
+- C++17 compiler: MSVC, GCC, or Clang
+- CMake 3.14+
+- `llama.cpp` submodule at `third_party/llama.cpp`
+- ONNX Runtime SDK
 
-### Easy Local Build (Windows)
-
-We provide a helper PowerShell script [build-local.ps1](build-local.ps1) in the root directory that automates cloning `llama.cpp`, downloading ONNX Runtime SDK, setting up MSVC compiler paths, configuring CMake, building the project, and packaging it.
-
-To build the project locally, open a PowerShell console and run:
+On Windows, the easiest path is:
 
 ```powershell
-.\build-local.ps1
+scripts\build-local.ps1
 ```
 
-**Parameters supported by `build-local.ps1`:**
-- `-OnnxRuntimeVersion <string>`: Specify ONNX Runtime SDK version to download (default: `1.24.4`).
-- `-Clean`: Clean the `build` directory before configuring CMake.
-- `-NoPackage`: Build the project but do not create the final zip package.
-- `-LlamaCppRepo <string>`: Custom Git repository URL for `llama.cpp`.
-- `-Generator <string>`: CMake generator to use (default: `Ninja`).
+Useful options:
 
-### Manual Build via CMake (CLI)
+```powershell
+scripts\build-local.ps1 -Clean
+scripts\build-local.ps1 -NoPackage
+scripts\build-local.ps1 -OnnxRuntimeVersion 1.24.4
+```
+
+Manual CMake build:
 
 ```bash
-mkdir build
-cd build
-
-# On Windows (MSVC + ONNX Runtime)
-cmake .. -DONNXRUNTIME_ROOT="C:/path/to/onnxruntime" -DVIENEU_LLAMA_DIR="../../llama.cpp"
-
-# Build the project
-cmake --build . --config Release
+cmake -S . -B build -DONNXRUNTIME_ROOT="C:/path/to/onnxruntime" -DVIENEU_LLAMA_DIR="third_party/llama.cpp"
+cmake --build build --config Release
 ```
 
-This will compile:
-1. `vieneu-tts-core` (Static Library)
-2. `vieneu-tts` (`.dll` on Windows, `.so` on Unix) (Shared Library containing the C ABI)
-3. `vieneu-tts-cli` (Command-line tool)
-4. `test-abi-c` (ABI test executable)
+Build outputs include:
 
----
+- `vieneu-tts-core`: static runtime library
+- `vieneu-tts`: shared library exposing the C ABI
+- `vieneu-tts-cli`: command-line synthesizer
+- `test-abi-c`: C ABI compile test
 
-## C ABI API Documentation
+## Quick Start
 
-The C ABI is defined in [src/vieneu/vieneu_tts.h](src/vieneu/vieneu_tts.h).
+Run a VieNeu v3 ONNX smoke test:
 
-### Principal Structures
-
-- **`vieneu_init_params`**: Parameters passed during initialization:
-  - `model_path`: Path to the GGUF model file.
-  - `encoder_path`: Path to ONNX speaker encoder (optional; needed for cloning).
-  - `decoder_path`: Path to ONNX neural decoder (required).
-  - `voices_json_path`: Path to voice presets database JSON (optional).
-  - `n_threads`: Number of CPU threads to allocate for inference.
-  - `n_gpu_layers`: Number of layers to offload to GPU.
-
-- **`vieneu_tts_params`**: Parameters used during synthesis:
-  - `text`: Input text string to synthesize.
-  - `voice_id`: Preset voice ID to load from `voices.json`.
-  - `voice_embedding`: Pointer to a custom 128-dimensional speaker embedding.
-  - `temperature`: Control randomness of generation (recommended: `0.3` - `0.5`).
-  - `top_k`: Token vocabulary restriction threshold.
-
-- **`vieneu_audio`**: Return structure for synthesized audio:
-  - `samples`: Pointer to float PCM array (`[-1.0f, 1.0f]`).
-  - `n_samples`: Size of the samples array.
-  - `sample_rate`: Sample rate of generated audio (e.g. `24000`).
-
----
-
-## Usage Examples
-
-### 1. Standalone CLI Usage (`vieneu-tts-cli`)
-
-Use the compiled CLI tool to synthesize text into a WAV file:
-
-```bash
-./vieneu-tts-cli \
-  --profile vieneu-v2-turbo \
-  --model "path/to/vieneu-tts-v2-turbo.gguf" \
-  --decoder "path/to/vieneu_decoder.onnx" \
-  --encoder "path/to/vieneu_encoder.onnx" \
-  --voices-json "path/to/voices.json" \
-  --voice "vi-female-preset" \
-  --text "Xin chào, tôi là mô hình tiếng nói trí tuệ nhân tạo." \
-  --output "hello.wav"
+```powershell
+scripts\run-v3-tts-test.ps1 `
+  -Text "Xin chào, đây là bài kiểm tra VieNeu TTS v3 Turbo từ runtime C++." `
+  -Output outputs\vieneu-v3-test.wav
 ```
 
-### 2. C ABI Integration Code Example
+Run the CLI directly after building:
 
-Below is a minimal C snippet demonstrating how to load the DLL/so and generate audio:
+```powershell
+build\Release\vieneu-tts-cli.exe `
+  --profile vieneu-v3-onnx `
+  --model-dir .models\vieneu-v3-turbo `
+  --onnx-dir .models\vieneu-v3-turbo\onnx `
+  --codec-dir .models\vieneu-v3-turbo\codec `
+  --voices-json .models\vieneu-v3-turbo\voices_v3_turbo.json `
+  --text "Xin chào, tôi là giọng nói tiếng Việt được tổng hợp bằng C++." `
+  --output outputs\hello.wav
+```
+
+Run native v3 voice cloning benchmark with the included reference clips:
+
+```powershell
+scripts\run-v3-native-voice-clone-benchmark.ps1 -NoBuild
+```
+
+Run one reference only:
+
+```powershell
+scripts\run-v3-native-voice-clone-benchmark.ps1 -NoBuild -Ref example_3
+```
+
+Generated WAV files are written to `outputs/` by default.
+
+## CLI Profiles
+
+`vieneu-tts-cli` supports these profiles:
+
+- `vieneu-v3-onnx`: v3 model assets plus ONNX Runtime sessions.
+- `vieneu-v3-native`: v3 model directory with native GGUF/backbone assets and MOSS codec.
+- `vieneu-v2-turbo`: legacy GGUF speech LM path with ONNX encoder/decoder assets.
+
+Common options:
+
+```text
+--profile NAME
+--model-dir PATH
+--onnx-dir PATH
+--codec-dir PATH
+--voices-json PATH
+--ref-audio PATH
+--text TEXT
+--voice ID
+--output PATH
+--temperature VALUE
+--top-k VALUE
+--top-p VALUE
+--max-new-frames N
+--max-chars N
+--threads N
+```
+
+## Project Layout
+
+```text
+src/
+  vieneu/        Stable C ABI and VieNeu v2/v3 runtime orchestration
+  codecs/        ONNX Runtime helpers for audio codec models
+  backends/      llama.cpp wrappers for GGUF/backbone inference
+tools/
+  vieneu-tts-cli.cpp
+scripts/
+  build-local.ps1
+  run-v3-tts-test.ps1
+  run-v3-native-preset-benchmark.ps1
+  run-v3-native-voice-clone-benchmark.ps1
+  export-v3-native-assets.py
+  export-v3-acoustic-weights.py
+examples/
+  audio_ref/     Reference clips and transcript manifest for voice cloning
+docs/
+  v3-native-cpp-pipeline.md
+```
+
+## C ABI
+
+The C API is defined in [`src/vieneu/vieneu_tts.h`](src/vieneu/vieneu_tts.h). It is intended for wrappers and host applications that want to embed VieNeu-TTS.cpp without depending on C++ symbols.
+
+Minimal shape:
 
 ```c
 #include "vieneu/vieneu_tts.h"
 #include <stdio.h>
-#include <stdlib.h>
 
 int main(void) {
-    // 1. Configure initialization params
-    struct vieneu_init_params init_p;
-    vieneu_init_default_params(&init_p);
-    init_p.model_path = "vieneu-tts-v2-turbo.gguf";
-    init_p.decoder_path = "vieneu_decoder.onnx";
-    init_p.n_threads = 4;
+    struct vieneu_init_params_v2 init;
+    vieneu_init_v2_default_params(&init);
+    init.profile = "vieneu-v3-onnx";
+    init.model_dir = ".models/vieneu-v3-turbo";
+    init.onnx_dir = ".models/vieneu-v3-turbo/onnx";
+    init.codec_dir = ".models/vieneu-v3-turbo/codec";
+    init.voices_json_path = ".models/vieneu-v3-turbo/voices_v3_turbo.json";
 
-    // 2. Initialize the VieNeu context
-    struct vieneu_context *ctx = vieneu_init(&init_p);
+    struct vieneu_context *ctx = vieneu_init_v2(&init);
     if (!ctx) {
-        fprintf(stderr, "Initialization failed: %s\n", vieneu_last_error());
+        fprintf(stderr, "init failed: %s\n", vieneu_last_error());
         return 1;
     }
 
-    // 3. Set TTS generation parameters
-    struct vieneu_tts_params tts_p;
-    vieneu_tts_default_params(&tts_p);
-    tts_p.text = "Xin chào các bạn.";
-    tts_p.temperature = 0.4f;
+    struct vieneu_tts_params_v2 tts;
+    vieneu_tts_v2_default_params(&tts);
+    tts.text = "Xin chào các bạn.";
+    tts.temperature = 0.8f;
+    tts.top_k = 25;
 
-    // 4. Synthesize speech
     struct vieneu_audio audio;
-    if (vieneu_synthesize(ctx, &tts_p, &audio) != 0) {
-        fprintf(stderr, "Synthesis failed: %s\n", vieneu_last_error());
+    if (vieneu_synthesize_v2(ctx, &tts, &audio) != 0) {
+        fprintf(stderr, "synthesis failed: %s\n", vieneu_last_error());
         vieneu_free(ctx);
         return 1;
     }
 
-    printf("Generated %d samples at %d Hz successfully!\n", 
-           audio.n_samples, audio.sample_rate);
-
-    // 5. Clean up allocated resources
+    printf("Generated %d samples at %d Hz\n", audio.n_samples, audio.sample_rate);
     vieneu_audio_free(&audio);
     vieneu_free(ctx);
     return 0;
 }
 ```
 
----
+## Notes
+
+- Keep large model files out of Git. Store them under `.models/` or download them from Hugging Face.
+- The included `.models/`, `build/`, `dist/`, and `outputs/` directories are local working directories.
+- For implementation details of the v3 native path, see [`docs/v3-native-cpp-pipeline.md`](docs/v3-native-cpp-pipeline.md).
+
+## Credits
+
+Special thanks to [pnnbao97](https://github.com/pnnbao97) and the original [pnnbao97/VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) project for the Vietnamese TTS model and reference implementation that this C++ runtime is based on.
+
+Thanks also to the authors and maintainers of [llama.cpp](https://github.com/ggml-org/llama.cpp), [ONNX Runtime](https://onnxruntime.ai/), and [MOSS Audio Tokenizer](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX).
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE) for details.

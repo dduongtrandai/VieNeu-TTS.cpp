@@ -17,8 +17,11 @@ if(MSVC)
 endif()
 
 # Configuration Options
-set(VIENEU_LLAMA_DIR "../llama.cpp" CACHE PATH "Path to llama.cpp source directory")
+set(VIENEU_LLAMA_DIR "third_party/llama.cpp" CACHE PATH "Path to llama.cpp source directory")
 set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to ONNX Runtime SDK root")
+option(VIENEU_PORTABLE_CPU "Build portable CPU kernels instead of host-native SIMD kernels" OFF)
+set(VIENEU_NATIVE_BACKEND "cpu" CACHE STRING "Native ggml backend to build: cpu, cuda, vulkan, or metal")
+set_property(CACHE VIENEU_NATIVE_BACKEND PROPERTY STRINGS "cpu" "cuda" "vulkan" "metal")
 
 # Fallback environment check for ONNX Runtime
 if(NOT ONNXRUNTIME_ROOT AND DEFINED ENV{ONNXRUNTIME_ROOT})
@@ -33,7 +36,35 @@ if(NOT EXISTS "${VIENEU_LLAMA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "llama.cpp CMakeLists.txt not found at ${VIENEU_LLAMA_DIR}")
 endif()
 
-set(GGML_NATIVE OFF CACHE BOOL "Build portable CPU kernels instead of host-native kernels" FORCE)
+if(VIENEU_PORTABLE_CPU)
+    set(GGML_NATIVE OFF CACHE BOOL "Build host-native ggml CPU kernels" FORCE)
+else()
+    set(GGML_NATIVE ON CACHE BOOL "Build host-native ggml CPU kernels" FORCE)
+endif()
+message(STATUS "VieNeu portable CPU build: ${VIENEU_PORTABLE_CPU}")
+message(STATUS "GGML native CPU kernels: ${GGML_NATIVE}")
+string(TOLOWER "${VIENEU_NATIVE_BACKEND}" VIENEU_NATIVE_BACKEND_NORMALIZED)
+if(NOT VIENEU_NATIVE_BACKEND_NORMALIZED MATCHES "^(cpu|cuda|vulkan|metal)$")
+    message(FATAL_ERROR "Unsupported VIENEU_NATIVE_BACKEND='${VIENEU_NATIVE_BACKEND}'. Expected cpu, cuda, vulkan, or metal.")
+endif()
+set(GGML_CUDA OFF CACHE BOOL "Build ggml CUDA backend" FORCE)
+set(GGML_VULKAN OFF CACHE BOOL "Build ggml Vulkan backend" FORCE)
+set(GGML_METAL OFF CACHE BOOL "Build ggml Metal backend" FORCE)
+if(VIENEU_NATIVE_BACKEND_NORMALIZED STREQUAL "cuda")
+    set(GGML_CUDA ON CACHE BOOL "Build ggml CUDA backend" FORCE)
+    if(WIN32)
+        set(GGML_CUDA_NCCL OFF CACHE BOOL "Disable NCCL for local Windows CUDA builds" FORCE)
+    endif()
+elseif(VIENEU_NATIVE_BACKEND_NORMALIZED STREQUAL "vulkan")
+    set(GGML_VULKAN ON CACHE BOOL "Build ggml Vulkan backend" FORCE)
+elseif(VIENEU_NATIVE_BACKEND_NORMALIZED STREQUAL "metal")
+    if(NOT APPLE)
+        message(FATAL_ERROR "VIENEU_NATIVE_BACKEND=metal is only supported on Apple platforms.")
+    endif()
+    set(GGML_METAL ON CACHE BOOL "Build ggml Metal backend" FORCE)
+    set(GGML_METAL_EMBED_LIBRARY ON CACHE BOOL "Embed Metal kernels in the runtime library" FORCE)
+endif()
+message(STATUS "VieNeu native ggml backend: ${VIENEU_NATIVE_BACKEND_NORMALIZED}")
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Do not build llama.cpp tests" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "Do not build llama.cpp tools" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Do not build llama.cpp examples" FORCE)
@@ -87,12 +118,27 @@ set(VIENEU_V3_ONNX_SOURCES
     src/vieneu/v3_onnx/vieneu_v3_onnx_voice.cpp
     src/vieneu/v3_onnx/vieneu_v3_onnx_utils.cpp
 )
+
+set(VIENEU_V3_NATIVE_SOURCES
+    src/vieneu/v3_native/v3_native_assets.cpp
+    src/vieneu/v3_native/v3_native_tokenizer.cpp
+    src/vieneu/v3_native/v3_native_prompt.cpp
+    src/vieneu/v3_native/v3_native_sampler.cpp
+    src/vieneu/v3_native/v3_native_backbone_llama.cpp
+    src/vieneu/v3_native/v3_native_acoustic_ggml.cpp
+    src/vieneu/v3_native/v3_native_moss_codec.cpp
+    src/vieneu/v3_native/v3_native_stream.cpp
+    src/vieneu/v3_native/v3_native_batch.cpp
+    src/vieneu/v3_native/vieneu_v3_native.cpp
+)
+
 # Core static library
 add_library(vieneu-tts-core STATIC
     src/backends/llama_backend.cpp
     src/codecs/neucodec_onnx.cpp
     src/vieneu/vieneu.cpp
     ${VIENEU_V3_ONNX_SOURCES}
+    ${VIENEU_V3_NATIVE_SOURCES}
 )
 
 target_include_directories(vieneu-tts-core PUBLIC
@@ -155,4 +201,11 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test-vieneu-phonemizer PRIVATE vieneu-tts-core)
     add_test(NAME vieneu-phonemizer COMMAND test-vieneu-phonemizer)
+
+    add_executable(test-v3-native-chunking
+        tests/v3-native-chunking.cpp
+    )
+    target_link_libraries(test-v3-native-chunking PRIVATE vieneu-tts-core)
+    add_test(NAME v3-native-chunking COMMAND test-v3-native-chunking)
+
 endif()

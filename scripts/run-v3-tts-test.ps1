@@ -23,7 +23,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$RepoRoot = $PSScriptRoot
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 $OrtSdkDir = Join-Path $RepoRoot "ort_sdk"
 if ($OnnxRuntimeFlavor -eq "cpu") {
     $OrtRoot = Join-Path $OrtSdkDir "onnxruntime-win-x64-$OnnxRuntimeVersion"
@@ -32,7 +32,7 @@ if ($OnnxRuntimeFlavor -eq "cpu") {
 } else {
     $OrtRoot = Join-Path $OrtSdkDir "Intel.ML.OnnxRuntime.OpenVino-$OpenVINOOnnxRuntimeVersion"
 }
-$LlamaDir = Join-Path $RepoRoot "llama.cpp"
+$LlamaDir = Join-Path $RepoRoot "third_party\llama.cpp"
 $ModelDir = Join-Path $RepoRoot $AssetRoot
 $OnnxDir = Join-Path $ModelDir "onnx"
 $CodecDir = Join-Path $ModelDir "codec"
@@ -41,9 +41,7 @@ $VoicesJson = Join-Path $ModelDir "voices_v3_turbo.json"
 # Find existing built CLI if available in common build directories
 $CliCandidates = @(
     (Join-Path $RepoRoot "build\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build-check\Release\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build-check\vieneu-tts-cli.exe")
+    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe")
 )
 
 $CliExe = $null
@@ -64,7 +62,7 @@ if ($CliExe) {
     }
 } else {
     # Default fallback if not built yet
-    $BuildDir = Join-Path $RepoRoot "build-check"
+    $BuildDir = Join-Path $RepoRoot "build"
     $ExeDir = Join-Path $BuildDir "Release"
     $CliExe = Join-Path $ExeDir "vieneu-tts-cli.exe"
 }
@@ -247,7 +245,7 @@ function Ensure-Built {
         throw "ONNX Runtime $OnnxRuntimeFlavor SDK was not found at $OrtRoot. Run .\build-local.ps1 -OnnxRuntimeFlavor $OnnxRuntimeFlavor once, or place the SDK there."
     }
     if (!(Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
-        throw "llama.cpp was not found at $LlamaDir. Run .\build-local.ps1 once, or clone llama.cpp there."
+        throw "llama.cpp was not found at $LlamaDir. Run .\build-local.ps1 once, or initialize submodules with git submodule update --init --recursive."
     }
 
     $cmake = Find-CMake

@@ -3,6 +3,9 @@
 #include "codecs/neucodec_onnx.h"
 #include "vieneu.h"
 #include "vieneu_v3_onnx.h"
+#include "v3_native/vieneu_v3_native.h"
+#include "v3_native/vieneu_v3_native.h"
+#include "v3_native/vieneu_v3_native.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -21,6 +24,22 @@ thread_local std::string g_last_error = "";
 
 static void set_last_error(const std::string& err) {
     g_last_error = err;
+}
+
+static VieneuProgressFn make_progress_bridge(vieneu_progress_callback callback, void * user_data) {
+    if (!callback) {
+        return VieneuProgressFn();
+    }
+    return [callback, user_data](const VieneuProgressEvent& event) {
+        vieneu_progress c_event;
+        c_event.abi_version = 1;
+        c_event.stage = event.stage ? event.stage : "";
+        c_event.current = event.current;
+        c_event.total = event.total;
+        c_event.progress = event.progress;
+        c_event.message = event.message.c_str();
+        callback(&c_event, user_data);
+    };
 }
 
 static std::string escape_regex(const std::string& text) {
@@ -103,7 +122,8 @@ static bool set_first_available_voice(struct vieneu_context * vieneu);
 
 enum class VieneuProfileType {
     VIENEU_V2_TURBO,
-    VIENEU_V3_ONNX
+    VIENEU_V3_ONNX,
+    VIENEU_V3_NATIVE
 };
 
 struct vieneu_context {
@@ -115,8 +135,11 @@ struct vieneu_context {
     std::unique_ptr<NeuCodecOnnx> codec_decoder;
     std::unique_ptr<NeuCodecOnnx> codec_encoder;
     std::unique_ptr<VieneuV3OnnxEngine> vieneu_v3;
+    std::unique_ptr<VieneuV3NativeEngine> vieneu_v3_native;
 
     std::string voices_json = "";
+    vieneu_progress_callback progress_callback = nullptr;
+    void * progress_user_data = nullptr;
 };
 
 static void normalize_output_level(std::vector<float>& audio) {
@@ -260,36 +283,64 @@ VIENEU_API struct vieneu_context * vieneu_init_v2(const struct vieneu_init_param
     }
 
     const std::string profile = params->profile ? params->profile : "";
-    if (profile != "vieneu-v3-onnx") {
+    if (profile != "vieneu-v3-onnx" && profile != "vieneu-v3-native") {
         set_last_error("Unsupported ABI v2 profile: " + profile);
         return nullptr;
     }
 
     auto ctx = std::make_unique<vieneu_context>();
-    ctx->profile = VieneuProfileType::VIENEU_V3_ONNX;
-    ctx->vieneu_v3 = std::make_unique<VieneuV3OnnxEngine>();
+    if (profile == "vieneu-v3-onnx") {
+        ctx->profile = VieneuProfileType::VIENEU_V3_ONNX;
+        ctx->vieneu_v3 = std::make_unique<VieneuV3OnnxEngine>();
 
-    VieneuV3OnnxInit init;
-    init.model_dir = params->model_dir ? params->model_dir : "";
-    init.onnx_dir = params->onnx_dir ? params->onnx_dir : "";
-    init.codec_dir = params->codec_dir ? params->codec_dir : "";
-    init.config_path = params->config_path ? params->config_path : "";
-    init.tokenizer_path = params->tokenizer_path ? params->tokenizer_path : "";
-    init.voices_json_path = params->voices_json_path ? params->voices_json_path : "";
-    init.n_threads = params->n_threads > 0 ? params->n_threads : 0;
+        VieneuV3OnnxInit init;
+        init.model_dir = params->model_dir ? params->model_dir : "";
+        init.onnx_dir = params->onnx_dir ? params->onnx_dir : "";
+        init.codec_dir = params->codec_dir ? params->codec_dir : "";
+        init.config_path = params->config_path ? params->config_path : "";
+        init.tokenizer_path = params->tokenizer_path ? params->tokenizer_path : "";
+        init.voices_json_path = params->voices_json_path ? params->voices_json_path : "";
+        init.n_threads = params->n_threads > 0 ? params->n_threads : 0;
 
-    std::string error;
-    if (!ctx->vieneu_v3->initialize(init, error)) {
-        set_last_error(error);
-        return nullptr;
+        std::string error;
+        if (!ctx->vieneu_v3->initialize(init, error)) {
+            set_last_error(error);
+            return nullptr;
+        }
+        ctx->voices_json = ctx->vieneu_v3->voices_json();
+    } else {
+        ctx->profile = VieneuProfileType::VIENEU_V3_NATIVE;
+        ctx->vieneu_v3_native = std::make_unique<VieneuV3NativeEngine>();
+
+        VieneuV3NativeInit init;
+        init.model_dir = params->model_dir ? params->model_dir : "";
+        init.onnx_dir = params->onnx_dir ? params->onnx_dir : "";
+        init.codec_dir = params->codec_dir ? params->codec_dir : "";
+        init.config_path = params->config_path ? params->config_path : "";
+        init.tokenizer_path = params->tokenizer_path ? params->tokenizer_path : "";
+        init.voices_json_path = params->voices_json_path ? params->voices_json_path : "";
+        init.n_threads = params->n_threads > 0 ? params->n_threads : 4;
+
+        std::string error;
+        if (!ctx->vieneu_v3_native->initialize(init, error)) {
+            set_last_error(error);
+            return nullptr;
+        }
+        ctx->voices_json = ctx->vieneu_v3_native->voices_json();
     }
-    ctx->voices_json = ctx->vieneu_v3->voices_json();
     return ctx.release();
 }
 
 VIENEU_API void vieneu_free(struct vieneu_context * vieneu) {
     if (vieneu) {
         delete vieneu;
+    }
+}
+
+VIENEU_API void vieneu_set_progress_callback(struct vieneu_context * vieneu, vieneu_progress_callback callback, void * user_data) {
+    if (vieneu) {
+        vieneu->progress_callback = callback;
+        vieneu->progress_user_data = user_data;
     }
 }
 
@@ -347,6 +398,7 @@ static int vieneu_synthesize_impl(struct vieneu_context * vieneu, const struct v
 
     std::vector<float> out_audio;
     bool success = false;
+    const VieneuProgressFn progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
 
     if (vieneu->profile == VieneuProfileType::VIENEU_V2_TURBO) {
         success = VieneuProfile::synthesize(
@@ -358,7 +410,8 @@ static int vieneu_synthesize_impl(struct vieneu_context * vieneu, const struct v
             params->top_k,
             params->max_tokens,
             params->skip_phonemize,
-            out_audio
+            out_audio,
+            progress
         );
     }
 
@@ -389,29 +442,63 @@ static int vieneu_synthesize_v2_impl(struct vieneu_context * vieneu, const struc
         set_last_error("Invalid synthesize_v2 arguments: context, params, text, and out are required.");
         return -1;
     }
-    if (vieneu->profile != VieneuProfileType::VIENEU_V3_ONNX || !vieneu->vieneu_v3) {
-        set_last_error("vieneu_synthesize_v2 is only supported for the vieneu-v3-onnx profile.");
+    if (vieneu->profile != VieneuProfileType::VIENEU_V3_ONNX && vieneu->profile != VieneuProfileType::VIENEU_V3_NATIVE) {
+        set_last_error("vieneu_synthesize_v2 is only supported for the vieneu-v3-onnx or vieneu-v3-native profile.");
         return -1;
     }
-
-    VieneuV3OnnxParams v3_params;
-    v3_params.text = params->text ? params->text : "";
-    v3_params.voice_id = params->voice_id ? params->voice_id : "";
-    v3_params.ref_audio_path = params->ref_audio_path ? params->ref_audio_path : "";
-    v3_params.temperature = params->temperature;
-    v3_params.top_k = params->top_k;
-    v3_params.top_p = params->top_p;
-    v3_params.max_new_frames = params->max_new_frames;
-    v3_params.repetition_penalty = params->repetition_penalty;
-    v3_params.max_chars = params->max_chars;
-    v3_params.apply_watermark = params->apply_watermark;
 
     std::vector<float> out_audio;
     std::string error;
-    if (!vieneu->vieneu_v3->synthesize(v3_params, out_audio, error)) {
-        set_last_error(error);
-        return -1;
+    int sr = 48000;
+
+    if (vieneu->profile == VieneuProfileType::VIENEU_V3_ONNX) {
+        if (!vieneu->vieneu_v3) {
+            set_last_error("ONNX engine not initialized.");
+            return -1;
+        }
+        VieneuV3OnnxParams v3_params;
+        v3_params.text = params->text ? params->text : "";
+        v3_params.voice_id = params->voice_id ? params->voice_id : "";
+        v3_params.ref_audio_path = params->ref_audio_path ? params->ref_audio_path : "";
+        v3_params.temperature = params->temperature;
+        v3_params.top_k = params->top_k;
+        v3_params.top_p = params->top_p;
+        v3_params.max_new_frames = params->max_new_frames;
+        v3_params.repetition_penalty = params->repetition_penalty;
+        v3_params.max_chars = params->max_chars;
+        v3_params.apply_watermark = params->apply_watermark;
+        v3_params.progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
+
+        if (!vieneu->vieneu_v3->synthesize(v3_params, out_audio, error)) {
+            set_last_error(error);
+            return -1;
+        }
+        sr = vieneu->vieneu_v3->sample_rate();
+    } else {
+        if (!vieneu->vieneu_v3_native) {
+            set_last_error("Native engine not initialized.");
+            return -1;
+        }
+        VieneuV3NativeParams v3_params;
+        v3_params.text = params->text ? params->text : "";
+        v3_params.voice_id = params->voice_id ? params->voice_id : "";
+        v3_params.ref_audio_path = params->ref_audio_path ? params->ref_audio_path : "";
+        v3_params.temperature = params->temperature;
+        v3_params.top_k = params->top_k;
+        v3_params.top_p = params->top_p;
+        v3_params.max_new_frames = params->max_new_frames;
+        v3_params.repetition_penalty = params->repetition_penalty;
+        v3_params.max_chars = params->max_chars;
+        v3_params.apply_watermark = params->apply_watermark;
+        v3_params.progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
+
+        if (!vieneu->vieneu_v3_native->synthesize(v3_params, out_audio, error)) {
+            set_last_error(error);
+            return -1;
+        }
+        sr = vieneu->vieneu_v3_native->sample_rate();
     }
+
     if (out_audio.empty()) {
         set_last_error("VieNeu v3 synthesis produced empty audio.");
         return -1;
@@ -425,7 +512,7 @@ static int vieneu_synthesize_v2_impl(struct vieneu_context * vieneu, const struc
     }
     std::copy(out_audio.begin(), out_audio.end(), out->samples);
     out->n_samples = (int)out_audio.size();
-    out->sample_rate = vieneu->vieneu_v3->sample_rate();
+    out->sample_rate = sr;
     out->channels = 1;
     return 0;
 }

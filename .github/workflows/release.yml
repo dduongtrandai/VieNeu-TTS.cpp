@@ -1,18 +1,61 @@
-name: Release SpeechLM TTS CPU Runtime
+name: Release VieNeu TTS Native Runtime
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
+env:
+  ORT_VERSION: "1.24.4"
+  CUDA_VERSION: "12.4.1"
+
 jobs:
-  build-and-release:
-    name: Build and Package CPU Release
-    runs-on: windows-latest
+  build:
+    name: ${{ matrix.archive }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            backend: cpu
+            package_flavor: cpu
+            archive: vieneu-tts-linux-cpu.tar.gz
+          - runner: ubuntu-latest
+            platform: linux
+            backend: cuda
+            package_flavor: cuda-12
+            archive: vieneu-tts-linux-cuda-12.tar.gz
+          - runner: ubuntu-latest
+            platform: linux
+            backend: vulkan
+            package_flavor: vulkan
+            archive: vieneu-tts-linux-vulkan.tar.gz
+          - runner: windows-latest
+            platform: win
+            backend: cpu
+            package_flavor: cpu
+            archive: vieneu-tts-win-cpu.zip
+          - runner: windows-latest
+            platform: win
+            backend: cuda
+            package_flavor: cuda-12
+            archive: vieneu-tts-win-cuda-12.zip
+          - runner: windows-latest
+            platform: win
+            backend: vulkan
+            package_flavor: vulkan
+            archive: vieneu-tts-win-vulkan.zip
+          - runner: macos-14
+            platform: macos
+            backend: metal
+            package_flavor: metal
+            archive: vieneu-tts-macos-metal.tar.gz
 
     steps:
       - name: Checkout Code
@@ -28,88 +71,162 @@ jobs:
           fetch-depth: 1
 
       - name: Setup MSVC Developer Command Prompt
+        if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Verify build tools
+      - name: Install common build tools
         shell: pwsh
         run: |
-          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+          if ("${{ runner.os }}" -eq "Windows") {
             choco install ninja -y --no-progress
+          } elseif ("${{ runner.os }}" -eq "Linux") {
+            sudo apt-get update
+            sudo apt-get install -y ninja-build build-essential
+          } else {
+            brew install ninja
           }
-          where.exe cl
-          where.exe cmake
-          where.exe ninja
           cmake --version
           ninja --version
 
-      - name: Install ONNX Runtime SDK (v1.20.1)
+      - name: Install CUDA Toolkit
+        if: matrix.backend == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+
+      - name: Verify CUDA Toolkit
+        if: matrix.backend == 'cuda'
         shell: pwsh
         run: |
-          $OrtVersion = "1.20.1"
-          $Url = "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVersion/onnxruntime-win-x64-$OrtVersion.zip"
-          $ZipFile = "onnxruntime-win-x64-$OrtVersion.zip"
-          Write-Host "Downloading ONNX Runtime SDK from $Url..."
-          Invoke-WebRequest -Uri $Url -OutFile $ZipFile
-          Write-Host "Extracting ONNX Runtime SDK..."
-          Expand-Archive -Path $ZipFile -DestinationPath "ort_sdk"
-          $OrtRoot = Resolve-Path "ort_sdk/onnxruntime-win-x64-$OrtVersion"
-          echo "ONNXRUNTIME_ROOT=$OrtRoot" >> $env:GITHUB_ENV
-          Write-Host "ONNX Runtime SDK successfully installed at $OrtRoot"
+          nvcc --version
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+
+      - name: Install Vulkan SDK
+        if: matrix.backend == 'vulkan'
+        shell: pwsh
+        run: |
+          if ("${{ runner.os }}" -eq "Windows") {
+            choco install vulkan-sdk -y --no-progress
+            $sdk = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            if (-not $sdk) { throw "Vulkan SDK was not installed under C:\VulkanSDK" }
+            "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "$($sdk.FullName)\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          } else {
+            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+            $codename = (lsb_release -cs)
+            sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list "https://packages.lunarg.com/vulkan/lunarg-vulkan-$codename.list"
+            sudo apt-get update
+            sudo apt-get install -y vulkan-sdk
+          }
+
+      - name: Download ONNX Runtime SDK
+        shell: pwsh
+        run: |
+          $version = "${{ env.ORT_VERSION }}"
+          New-Item -ItemType Directory -Force -Path "ort_sdk" | Out-Null
+
+          if ("${{ matrix.platform }}" -eq "win") {
+            $name = "onnxruntime-win-x64-$version"
+            $archive = "$name.zip"
+          } elseif ("${{ matrix.platform }}" -eq "macos") {
+            $name = "onnxruntime-osx-universal2-$version"
+            $archive = "$name.tgz"
+          } else {
+            $name = "onnxruntime-linux-x64-$version"
+            $archive = "$name.tgz"
+          }
+
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+
+          if ($archive.EndsWith(".zip")) {
+            Expand-Archive -Path $archive -DestinationPath "ort_sdk" -Force
+          } else {
+            tar -xzf $archive -C "ort_sdk"
+          }
+
+          $ortRoot = Resolve-Path (Join-Path "ort_sdk" $name)
+          "ONNXRUNTIME_ROOT=$ortRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "ONNXRUNTIME_ROOT=$ortRoot"
 
       - name: Configure CMake
         shell: pwsh
         run: |
-          if (Test-Path "build") {
-            Remove-Item -Recurse -Force "build"
-          }
-
-          # Fallback for older workflow runs / forks that do not have the dedicated checkout step.
-          if (-not (Test-Path "llama.cpp/CMakeLists.txt") -and -not (Test-Path "llama/CMakeLists.txt")) {
-            Write-Host "llama.cpp source not found. Cloning ggml-org/llama.cpp as fallback..."
-            git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
-          }
-
-          $llamaDir = ""
-          if (Test-Path "llama.cpp/CMakeLists.txt") {
-            $llamaDir = "llama.cpp"
-          } elseif (Test-Path "llama/CMakeLists.txt") {
-            $llamaDir = "llama"
-          } else {
-            Write-Error "Could not find llama.cpp source directory (expected llama.cpp/ or llama/)."
-          }
-
           $cmakeArgs = @(
             "-B", "build",
             "-S", ".",
             "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
-            "-DSLM_LLAMA_DIR=$llamaDir",
-            "-DONNXRUNTIME_ROOT=${{ env.ONNXRUNTIME_ROOT }}"
+            "-DVIENEU_PORTABLE_CPU=ON",
+            "-DVIENEU_NATIVE_BACKEND=${{ matrix.backend }}",
+            "-DVIENEU_LLAMA_DIR=llama.cpp",
+            "-DONNXRUNTIME_ROOT=$env:ONNXRUNTIME_ROOT"
           )
+
+          if ("${{ matrix.platform }}" -eq "macos") {
+            $cmakeArgs += "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          }
 
           cmake @cmakeArgs
 
       - name: Build Project
         shell: pwsh
-        run: |
-          cmake --build build --parallel
+        run: cmake --build build --config Release --parallel
 
-      - name: Package Runtime Release
+      - name: Package Runtime
         shell: pwsh
         run: |
           pwsh -File scripts/package-runtime.ps1 `
             -BuildDir "build" `
             -OutputDir "dist" `
-            -OnnxRuntimeRoot "${{ env.ONNXRUNTIME_ROOT }}" `
+            -OnnxRuntimeRoot "$env:ONNXRUNTIME_ROOT" `
+            -RuntimeFlavor "cpu" `
+            -NativeBackend "${{ matrix.backend }}" `
+            -PackageFlavor "${{ matrix.package_flavor }}" `
+            -PackagePlatform "${{ matrix.platform }}" `
+            -OnnxRuntimeVersion "${{ env.ORT_VERSION }}" `
             -RuntimeVersion "${{ github.ref_name }}"
 
-      - name: Create Release
+      - name: Upload Runtime Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/speech-lm-tts-win-cpu.zip
+          files: dist/*
           draft: false
           prerelease: false
+          body: |
+            Pre-compiled v3_native binaries for supported local backends.
+
+            | Archive | OS | Backend | GPU |
+            | --- | --- | --- | --- |
+            | `vieneu-tts-linux-cpu.tar.gz` | Linux x86_64 | CPU | - |
+            | `vieneu-tts-linux-cuda-12.tar.gz` | Linux x86_64 | CUDA 12 | NVIDIA |
+            | `vieneu-tts-linux-vulkan.tar.gz` | Linux x86_64 | Vulkan | AMD / Intel / NVIDIA |
+            | `vieneu-tts-win-cpu.zip` | Windows x64 | CPU | - |
+            | `vieneu-tts-win-cuda-12.zip` | Windows x64 | CUDA 12 | NVIDIA |
+            | `vieneu-tts-win-vulkan.zip` | Windows x64 | Vulkan | AMD / Intel / NVIDIA |
+            | `vieneu-tts-macos-metal.tar.gz` | macOS Universal | Metal | Apple Silicon / Intel |
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

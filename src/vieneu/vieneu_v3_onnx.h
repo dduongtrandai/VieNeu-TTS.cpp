@@ -6,11 +6,12 @@
 #include <random>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "onnxruntime_cxx_api.h"
+#include "v3_common/v3_repetition_history.h"
+#include "vieneu_progress.h"
 
 struct VieneuV3OnnxInit {
     std::string model_dir;
@@ -33,6 +34,9 @@ struct VieneuV3OnnxParams {
     float repetition_penalty = 1.2f;
     int max_chars = 384;
     bool apply_watermark = true;
+    VieneuProgressFn progress;
+    float progress_base = 0.0f;
+    float progress_span = 1.0f;
 };
 
 class VieneuV3OnnxEngine {
@@ -151,7 +155,7 @@ private:
                                     int top_k,
                                     float top_p,
                                     float repetition_penalty,
-                                    std::vector<std::unordered_set<int>>& history,
+                                    std::vector<V3RepetitionHistory>& history,
                                     std::vector<int64_t>& codes,
                                     bool& eos,
                                     std::string& error) = 0;
@@ -191,7 +195,7 @@ private:
                         int top_k,
                         float top_p,
                         float repetition_penalty,
-                        std::vector<std::unordered_set<int>>& history,
+                        std::vector<V3RepetitionHistory>& history,
                         std::vector<int64_t>& codes,
                         bool& eos,
                         std::string& error);
@@ -200,7 +204,7 @@ private:
                              int top_k,
                              float top_p,
                              float repetition_penalty,
-                             std::vector<std::unordered_set<int>>& history,
+                             std::vector<V3RepetitionHistory>& history,
                              std::vector<int64_t>& codes,
                              bool& eos,
                              std::string& error);
@@ -209,7 +213,7 @@ private:
                           int top_k,
                           float top_p,
                           float repetition_penalty,
-                          const std::unordered_set<int>* previous);
+                          const V3RepetitionHistory* previous);
     bool decode_codes(const std::vector<int32_t>& frames, int64_t frame_count, std::vector<float>& out_audio, std::string& error);
     std::string phonemize_for_v3(const std::string& text) const;
     void reset_benchmark_stats();
@@ -244,6 +248,7 @@ private:
     std::string model_dir_;
     std::string onnx_dir_;
     std::string codec_dir_;
+    int threads_to_use_ = 4;
     std::mutex run_mutex_;
     std::mt19937 rng_;
     bool initialized_ = false;

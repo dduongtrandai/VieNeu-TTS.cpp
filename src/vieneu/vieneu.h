@@ -5,6 +5,7 @@
 #include <vector>
 #include "backends/llama_backend.h"
 #include "codecs/neucodec_onnx.h"
+#include "vieneu_progress.h"
 
 class VieneuProfile {
 public:
@@ -23,7 +24,8 @@ public:
         int top_k,
         int max_tokens,
         bool skip_phonemize,
-        std::vector<float>& out_audio
+        std::vector<float>& out_audio,
+        const VieneuProgressFn& progress = VieneuProgressFn()
     );
 };
 

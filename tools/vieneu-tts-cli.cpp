@@ -198,26 +198,26 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (profile == "vieneu-v3-onnx") {
+    if (profile == "vieneu-v3-onnx" || profile == "vieneu-v3-native") {
         if (model_dir.empty() && onnx_dir.empty()) {
-            std::cerr << "Error: --model-dir or --onnx-dir is required for vieneu-v3-onnx.\n";
+            std::cerr << "Error: --model-dir or --onnx-dir is required for " << profile << ".\n";
             print_usage(argv0);
             return 1;
         }
         if (codec_dir.empty()) {
-            std::cerr << "Error: --codec-dir is required for vieneu-v3-onnx.\n";
+            std::cerr << "Error: --codec-dir is required for " << profile << ".\n";
             print_usage(argv0);
             return 1;
         }
 
-        std::cout << "[CLI] Initializing VieNeu v3 ONNX context...\n"
+        std::cout << "[CLI] Initializing VieNeu v3 " << (profile == "vieneu-v3-onnx" ? "ONNX" : "Native") << " context...\n"
                   << "  Model dir: " << model_dir << "\n"
                   << "  ONNX dir: " << onnx_dir << "\n"
                   << "  Codec dir: " << codec_dir << "\n";
 
         vieneu_init_params_v2 params;
         vieneu_init_v2_default_params(&params);
-        params.profile = "vieneu-v3-onnx";
+        params.profile = profile.c_str();
         params.model_dir = model_dir.empty() ? nullptr : model_dir.c_str();
         params.onnx_dir = onnx_dir.empty() ? nullptr : onnx_dir.c_str();
         params.codec_dir = codec_dir.c_str();

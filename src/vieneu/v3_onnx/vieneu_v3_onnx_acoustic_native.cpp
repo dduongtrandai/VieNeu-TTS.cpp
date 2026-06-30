@@ -13,42 +13,74 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 #include <vector>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace {
 
-int ggml_thread_count_from_env() {
+int ggml_thread_count_from_env(int fallback_threads) {
     const char* value = std::getenv("OMP_NUM_THREADS");
     if (!value || !*value) {
-        return 4;
+        return (std::max)(1, fallback_threads);
     }
     char* end = nullptr;
     const long parsed = std::strtol(value, &end, 10);
     if (end == value || parsed <= 0) {
-        return 4;
+        return (std::max)(1, fallback_threads);
     }
     return static_cast<int>(std::min<long>(parsed, 32));
 }
 
-bool env_flag_enabled(const char* name) {
+bool env_flag_enabled(const char* name, bool default_value = false) {
     const char* value = std::getenv(name);
     if (!value || !*value) {
-        return false;
+        return default_value;
     }
     std::string normalized(value);
     std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
+    if (normalized == "0" || normalized == "false" || normalized == "no" || normalized == "off") {
+        return false;
+    }
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+bool use_direct_linear_backend() {
+    if (env_flag_enabled("VIENEU_ACOUSTIC_DIRECT_LINEAR", false)) {
+        return true;
+    }
+    return !env_flag_enabled("VIENEU_ACOUSTIC_GGML_LINEAR", true);
+}
+
+void linear_matvec_cpu(const float* weight, const float* input, int out_dim, int in_dim, int n_threads, float* output) {
+    const bool use_parallel = n_threads > 1 && out_dim >= 64;
+#if defined(_OPENMP)
+#pragma omp parallel for if(use_parallel) num_threads(n_threads) schedule(static)
+#endif
+    for (int o = 0; o < out_dim; ++o) {
+        const float* row = weight + static_cast<size_t>(o) * in_dim;
+        float sum = 0.0f;
+#if defined(_MSC_VER)
+#pragma loop(ivdep)
+#elif defined(__GNUC__) || defined(__clang__)
+#pragma GCC ivdep
+#endif
+        for (int i = 0; i < in_dim; ++i) {
+            sum += row[i] * input[i];
+        }
+        output[o] = sum;
+    }
 }
 
 class GgmlLinearOp {
 public:
     GgmlLinearOp() = default;
 
-    GgmlLinearOp(ggml_backend_t backend, const float* weight, int out_dim, int in_dim, const char* name) {
-        initialize(backend, weight, out_dim, in_dim, name);
+    GgmlLinearOp(ggml_backend_t backend, const float* weight, int out_dim, int in_dim, int n_threads, const char* name) {
+        initialize(backend, weight, out_dim, in_dim, n_threads, name);
     }
 
     GgmlLinearOp(const GgmlLinearOp&) = delete;
@@ -70,16 +102,21 @@ public:
         release();
     }
 
-    void initialize(ggml_backend_t backend, const float* weight, int out_dim, int in_dim, const char* name) {
+    void initialize(ggml_backend_t backend, const float* weight, int out_dim, int in_dim, int n_threads, const char* name) {
         release();
         if (!backend) {
             throw std::runtime_error("ggml backend is not initialized");
         }
         (void) backend;
-        thread_count_ = ggml_thread_count_from_env();
+        thread_count_ = ggml_thread_count_from_env(n_threads);
         in_dim_ = in_dim;
         out_dim_ = out_dim;
         name_ = name ? name : "linear";
+        direct_weight_ = weight;
+        use_direct_ = use_direct_linear_backend();
+        if (use_direct_) {
+            return;
+        }
 
         const size_t ctx_size = 1024 * 1024 + static_cast<size_t>(in_dim_) * out_dim_ * sizeof(float) +
             static_cast<size_t>(in_dim_ + out_dim_) * sizeof(float);
@@ -109,6 +146,10 @@ public:
 
     void run(const float* input, std::vector<float>& output) {
         output.resize(static_cast<size_t>(out_dim_));
+        if (use_direct_) {
+            linear_matvec_cpu(direct_weight_, input, out_dim_, in_dim_, thread_count_, output.data());
+            return;
+        }
         std::memcpy(input_->data, input, static_cast<size_t>(in_dim_) * sizeof(float));
         const ggml_status status = ggml_graph_compute(graph_, &plan_);
         if (status != GGML_STATUS_SUCCESS) {
@@ -132,6 +173,8 @@ private:
         thread_count_ = 1;
         work_data_.clear();
         name_.clear();
+        direct_weight_ = nullptr;
+        use_direct_ = true;
     }
 
     void move_from(GgmlLinearOp& other) noexcept {
@@ -145,10 +188,12 @@ private:
         if (!work_data_.empty()) {
             plan_.work_data = work_data_.data();
         }
+        direct_weight_ = other.direct_weight_;
         in_dim_ = other.in_dim_;
         out_dim_ = other.out_dim_;
         thread_count_ = other.thread_count_;
         name_ = std::move(other.name_);
+        use_direct_ = other.use_direct_;
 
         other.ctx_ = nullptr;
         other.weight_ = nullptr;
@@ -159,6 +204,8 @@ private:
         other.out_dim_ = 0;
         other.thread_count_ = 1;
         other.work_data_.clear();
+        other.direct_weight_ = nullptr;
+        other.use_direct_ = true;
     }
 
     ggml_context* ctx_ = nullptr;
@@ -168,10 +215,12 @@ private:
     ggml_cgraph* graph_ = nullptr;
     ggml_cplan plan_{};
     std::vector<uint8_t> work_data_;
+    const float* direct_weight_ = nullptr;
     int in_dim_ = 0;
     int out_dim_ = 0;
     int thread_count_ = 1;
     std::string name_;
+    bool use_direct_ = true;
 };
 
 class GgmlFfnOp {
@@ -203,16 +252,27 @@ public:
                     const float* down_weight,
                     int hidden_dim,
                     int intermediate_dim,
+                    int n_threads,
                     const char* name) {
         release();
         if (!backend) {
             throw std::runtime_error("ggml backend is not initialized");
         }
         (void) backend;
-        thread_count_ = ggml_thread_count_from_env();
+        thread_count_ = ggml_thread_count_from_env(n_threads);
         hidden_dim_ = hidden_dim;
         intermediate_dim_ = intermediate_dim;
         name_ = name ? name : "ffn";
+        gate_weight_direct_ = gate_weight;
+        up_weight_direct_ = up_weight;
+        down_weight_direct_ = down_weight;
+        use_direct_ = use_direct_linear_backend();
+        if (use_direct_) {
+            gate_direct_.resize(static_cast<size_t>(intermediate_dim_));
+            up_direct_.resize(static_cast<size_t>(intermediate_dim_));
+            fused_direct_.resize(static_cast<size_t>(intermediate_dim_));
+            return;
+        }
 
         const size_t weight_bytes =
             2 * static_cast<size_t>(intermediate_dim_) * hidden_dim_ * sizeof(float) +
@@ -253,6 +313,16 @@ public:
 
     void run(const float* input, std::vector<float>& output) {
         output.resize(static_cast<size_t>(hidden_dim_));
+        if (use_direct_) {
+            linear_matvec_cpu(gate_weight_direct_, input, intermediate_dim_, hidden_dim_, thread_count_, gate_direct_.data());
+            linear_matvec_cpu(up_weight_direct_, input, intermediate_dim_, hidden_dim_, thread_count_, up_direct_.data());
+            for (int i = 0; i < intermediate_dim_; ++i) {
+                const float gate = gate_direct_[static_cast<size_t>(i)];
+                fused_direct_[static_cast<size_t>(i)] = up_direct_[static_cast<size_t>(i)] * (gate / (1.0f + std::exp(-gate)));
+            }
+            linear_matvec_cpu(down_weight_direct_, fused_direct_.data(), hidden_dim_, intermediate_dim_, thread_count_, output.data());
+            return;
+        }
         std::memcpy(input_->data, input, static_cast<size_t>(hidden_dim_) * sizeof(float));
         const ggml_status status = ggml_graph_compute(graph_, &plan_);
         if (status != GGML_STATUS_SUCCESS) {
@@ -278,6 +348,13 @@ private:
         thread_count_ = 1;
         work_data_.clear();
         name_.clear();
+        gate_weight_direct_ = nullptr;
+        up_weight_direct_ = nullptr;
+        down_weight_direct_ = nullptr;
+        gate_direct_.clear();
+        up_direct_.clear();
+        fused_direct_.clear();
+        use_direct_ = true;
     }
 
     void move_from(GgmlFfnOp& other) noexcept {
@@ -293,10 +370,17 @@ private:
         if (!work_data_.empty()) {
             plan_.work_data = work_data_.data();
         }
+        gate_weight_direct_ = other.gate_weight_direct_;
+        up_weight_direct_ = other.up_weight_direct_;
+        down_weight_direct_ = other.down_weight_direct_;
+        gate_direct_ = std::move(other.gate_direct_);
+        up_direct_ = std::move(other.up_direct_);
+        fused_direct_ = std::move(other.fused_direct_);
         hidden_dim_ = other.hidden_dim_;
         intermediate_dim_ = other.intermediate_dim_;
         thread_count_ = other.thread_count_;
         name_ = std::move(other.name_);
+        use_direct_ = other.use_direct_;
 
         other.ctx_ = nullptr;
         other.gate_weight_ = nullptr;
@@ -309,6 +393,13 @@ private:
         other.intermediate_dim_ = 0;
         other.thread_count_ = 1;
         other.work_data_.clear();
+        other.gate_weight_direct_ = nullptr;
+        other.up_weight_direct_ = nullptr;
+        other.down_weight_direct_ = nullptr;
+        other.gate_direct_.clear();
+        other.up_direct_.clear();
+        other.fused_direct_.clear();
+        other.use_direct_ = true;
     }
 
     ggml_context* ctx_ = nullptr;
@@ -320,10 +411,17 @@ private:
     ggml_cgraph* graph_ = nullptr;
     ggml_cplan plan_{};
     std::vector<uint8_t> work_data_;
+    const float* gate_weight_direct_ = nullptr;
+    const float* up_weight_direct_ = nullptr;
+    const float* down_weight_direct_ = nullptr;
+    std::vector<float> gate_direct_;
+    std::vector<float> up_direct_;
+    std::vector<float> fused_direct_;
     int hidden_dim_ = 0;
     int intermediate_dim_ = 0;
     int thread_count_ = 1;
     std::string name_;
+    bool use_direct_ = true;
 };
 
 } // namespace
@@ -335,8 +433,8 @@ public:
         if (!backend_) {
             throw std::runtime_error("failed to initialize ggml CPU backend");
         }
-        ggml_backend_cpu_set_n_threads(backend_, ggml_thread_count_from_env());
-        fuse_ffn_ = env_flag_enabled("VIENEU_GGML_FUSE_FFN");
+        ggml_backend_cpu_set_n_threads(backend_, ggml_thread_count_from_env(engine_.threads_to_use_));
+        fuse_ffn_ = env_flag_enabled("VIENEU_GGML_FUSE_FFN", true);
         initialize_ops();
     }
 
@@ -357,7 +455,7 @@ public:
                         int top_k,
                         float top_p,
                         float repetition_penalty,
-                        std::vector<std::unordered_set<int>>& history,
+                        std::vector<V3RepetitionHistory>& history,
                         std::vector<int64_t>& codes,
                         bool& eos,
                         std::string& error) override {
@@ -385,6 +483,18 @@ private:
     struct LayerCache {
         std::vector<float> k;
         std::vector<float> v;
+        int used = 0;
+
+        void initialize(int max_tokens, int hidden_size) {
+            const size_t values = static_cast<size_t>(max_tokens) * hidden_size;
+            k.resize(values);
+            v.resize(values);
+            used = 0;
+        }
+
+        void reset() {
+            used = 0;
+        }
     };
 
     struct LayerOps {
@@ -439,36 +549,67 @@ private:
         const auto& weights = engine_.acoustic_weights_;
         const int H = cfg.hidden_size;
         const int I = cfg.local_intermediate_size;
+        const int n_threads = engine_.threads_to_use_;
         layer_ops_.clear();
         layer_ops_.reserve(weights.layers.size());
         for (size_t i = 0; i < weights.layers.size(); ++i) {
             const AcousticLayerWeights& w = weights.layers[i];
             const std::string prefix = "acoustic.layer." + std::to_string(i) + ".";
             LayerOps ops;
-            ops.qkv.initialize(backend_, w.qkv.data(), 3 * H, H, (prefix + "qkv").c_str());
-            ops.o_proj.initialize(backend_, w.o_proj.data(), H, H, (prefix + "o_proj").c_str());
+            ops.qkv.initialize(backend_, w.qkv.data(), 3 * H, H, n_threads, (prefix + "qkv").c_str());
+            ops.o_proj.initialize(backend_, w.o_proj.data(), H, H, n_threads, (prefix + "o_proj").c_str());
             if (fuse_ffn_) {
-                ops.ffn.initialize(backend_, w.ff_gate.data(), w.ff_up.data(), w.ff_down.data(), H, I, (prefix + "ffn").c_str());
+                ops.ffn.initialize(backend_, w.ff_gate.data(), w.ff_up.data(), w.ff_down.data(), H, I, n_threads, (prefix + "ffn").c_str());
             } else {
-                ops.ff_gate.initialize(backend_, w.ff_gate.data(), I, H, (prefix + "ff_gate").c_str());
-                ops.ff_up.initialize(backend_, w.ff_up.data(), I, H, (prefix + "ff_up").c_str());
-                ops.ff_down.initialize(backend_, w.ff_down.data(), H, I, (prefix + "ff_down").c_str());
+                ops.ff_gate.initialize(backend_, w.ff_gate.data(), I, H, n_threads, (prefix + "ff_gate").c_str());
+                ops.ff_up.initialize(backend_, w.ff_up.data(), I, H, n_threads, (prefix + "ff_up").c_str());
+                ops.ff_down.initialize(backend_, w.ff_down.data(), H, I, n_threads, (prefix + "ff_down").c_str());
             }
             layer_ops_.push_back(std::move(ops));
         }
+
+        const int max_local_tokens = cfg.n_vq + 2;
+        caches_.resize(static_cast<size_t>(cfg.local_num_hidden_layers));
+        for (LayerCache& cache : caches_) {
+            cache.initialize(max_local_tokens, H);
+        }
+
+        token_.reserve(static_cast<size_t>(2 * H));
+        hidden_.reserve(static_cast<size_t>(2 * H));
+        slot0_.resize(static_cast<size_t>(H));
+        logits_.reserve(static_cast<size_t>(cfg.audio_vocab_size));
+        text_logits_.reserve(static_cast<size_t>(cfg.text_vocab_size));
+        x_.reserve(static_cast<size_t>(2 * H));
+        normed_.reserve(static_cast<size_t>(2 * H));
+        qkv_.reserve(static_cast<size_t>(3 * H));
+        q_.reserve(static_cast<size_t>(2 * H));
+        new_k_.reserve(static_cast<size_t>(2 * H));
+        new_v_.reserve(static_cast<size_t>(2 * H));
+        attn_out_.reserve(static_cast<size_t>(2 * H));
+        proj_.reserve(static_cast<size_t>(H));
+        gate_.reserve(static_cast<size_t>(I));
+        up_.reserve(static_cast<size_t>(I));
+        down_.reserve(static_cast<size_t>(H));
+        scores_.reserve(static_cast<size_t>(max_local_tokens));
     }
 
-    void cached_step(const std::vector<float>& input, const std::vector<int>& positions, std::vector<float>& output) {
+    void reset_caches() {
+        for (LayerCache& cache : caches_) {
+            cache.reset();
+        }
+    }
+
+    void cached_step(const std::vector<float>& input, const int* positions, int S, std::vector<float>& output) {
         const auto& cfg = engine_.config_;
         const auto& weights = engine_.acoustic_weights_;
         const int H = cfg.hidden_size;
         const int nH = cfg.local_num_attention_heads;
         const int hd = H / nH;
         const int I = cfg.local_intermediate_size;
-        const int S = static_cast<int>(positions.size());
         const float inv_sqrt_hd = 1.0f / std::sqrt(static_cast<float>(hd));
 
-        x_ = input;
+        x_.resize(static_cast<size_t>(S * H));
+        std::copy(input.begin(), input.begin() + static_cast<size_t>(S * H), x_.begin());
         for (int s = 0; s < S; ++s) {
             const int pos = positions[static_cast<size_t>(s)];
             if (pos < 0 || pos > cfg.n_vq) {
@@ -491,7 +632,7 @@ private:
             const AcousticLayerWeights& w = weights.layers[static_cast<size_t>(layer)];
             LayerOps& ops = layer_ops_[static_cast<size_t>(layer)];
             LayerCache& cache = caches_[static_cast<size_t>(layer)];
-            const int past = static_cast<int>(cache.k.size() / static_cast<size_t>(H));
+            const int past = cache.used;
 
             for (int s = 0; s < S; ++s) {
                 rms_norm(
@@ -522,8 +663,19 @@ private:
                 }
             }
 
-            cache.k.insert(cache.k.end(), new_k_.begin(), new_k_.begin() + static_cast<size_t>(S * H));
-            cache.v.insert(cache.v.end(), new_v_.begin(), new_v_.begin() + static_cast<size_t>(S * H));
+            const int new_used = past + S;
+            const size_t required_cache_values = static_cast<size_t>(new_used) * H;
+            if (cache.k.size() < required_cache_values) {
+                cache.k.resize(required_cache_values);
+                cache.v.resize(required_cache_values);
+            }
+            for (int s = 0; s < S; ++s) {
+                const size_t dst = static_cast<size_t>(past + s) * H;
+                const size_t src = static_cast<size_t>(s) * H;
+                std::copy(new_k_.begin() + src, new_k_.begin() + src + H, cache.k.begin() + dst);
+                std::copy(new_v_.begin() + src, new_v_.begin() + src + H, cache.v.begin() + dst);
+            }
+            cache.used = new_used;
 
             std::fill(attn_out_.begin(), attn_out_.end(), 0.0f);
             for (int s = 0; s < S; ++s) {
@@ -606,14 +758,14 @@ private:
                            int top_k,
                            float top_p,
                            float repetition_penalty,
-                           std::vector<std::unordered_set<int>>& history) {
+                           std::vector<V3RepetitionHistory>& history) {
         const float* head = engine_.audio_emb_t_.data.data() +
             static_cast<int64_t>(ch) * engine_.audio_emb_t_.dim1 * engine_.audio_emb_t_.dim2;
         matvec_transposed(vec, head, engine_.audio_emb_t_.dim1, engine_.audio_emb_t_.dim2, logits_);
-        std::unordered_set<int>* prev = history.empty() ? nullptr : &history[static_cast<size_t>(ch)];
+        V3RepetitionHistory* prev = history.empty() ? nullptr : &history[static_cast<size_t>(ch)];
         const int64_t code = engine_.sample_logits(logits_, temperature, top_k, top_p, repetition_penalty, prev);
         if (prev) {
-            prev->insert(static_cast<int>(code));
+            prev->add(static_cast<int32_t>(code));
         }
         return code;
     }
@@ -623,7 +775,7 @@ private:
                              int top_k,
                              float top_p,
                              float repetition_penalty,
-                             std::vector<std::unordered_set<int>>& history,
+                             std::vector<V3RepetitionHistory>& history,
                              std::vector<int64_t>& codes,
                              bool& eos) {
         const auto& cfg = engine_.config_;
@@ -635,14 +787,15 @@ private:
             throw std::runtime_error("native acoustic input hidden state is too small");
         }
 
-        caches_.assign(static_cast<size_t>(cfg.local_num_hidden_layers), LayerCache{});
+        reset_caches();
         token_.resize(static_cast<size_t>(2 * H));
         std::copy(h.begin(), h.begin() + H, token_.begin());
         const float* sgs = engine_.text_emb_.data.data() + cfg.speech_generation_start_token_id * engine_.text_emb_.cols;
         std::copy(sgs, sgs + H, token_.begin() + H);
 
-        cached_step(token_, {0, 1}, hidden_);
-        slot0_.assign(hidden_.begin(), hidden_.begin() + H);
+        const int initial_positions[2] = {0, 1};
+        cached_step(token_, initial_positions, 2, hidden_);
+        std::copy(hidden_.begin(), hidden_.begin() + H, slot0_.begin());
 
         codes.clear();
         codes.reserve(static_cast<size_t>(cfg.n_vq));
@@ -655,8 +808,10 @@ private:
             }
             const float* emb = engine_.audio_emb_.data.data() +
                 (static_cast<int64_t>(ch - 1) * engine_.audio_emb_.dim1 + prev_code) * engine_.audio_emb_.dim2;
-            token_.assign(emb, emb + H);
-            cached_step(token_, {ch + 1}, hidden_);
+            token_.resize(static_cast<size_t>(H));
+            std::copy(emb, emb + H, token_.begin());
+            const int step_position = ch + 1;
+            cached_step(token_, &step_position, 1, hidden_);
             codes.push_back(sample_channel(ch, hidden_.data(), temperature, top_k, top_p, repetition_penalty, history));
         }
 
