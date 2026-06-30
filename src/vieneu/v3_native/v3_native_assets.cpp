@@ -300,6 +300,9 @@ bool V3NativeAssets::load_config(const std::string& path, std::string& error) {
         config_.speech_generation_end_token_id = c.value("speech_generation_end_token_id", config_.speech_generation_end_token_id);
         config_.audio_ref_slot_token_id = c.value("audio_ref_slot_token_id", config_.audio_ref_slot_token_id);
         config_.emotion_0_token_id = c.value("emotion_0_token_id", config_.emotion_0_token_id);
+        config_.emotion_1_token_id = c.value("emotion_1_token_id", config_.emotion_1_token_id);
+        config_.emotion_2_token_id = c.value("emotion_2_token_id", config_.emotion_2_token_id);
+        config_.emotion_3_token_id = c.value("emotion_3_token_id", config_.emotion_3_token_id);
         config_.emotion_4_token_id = c.value("emotion_4_token_id", config_.emotion_4_token_id);
         config_.text_vocab_size = c.value("text_vocab_size", config_.text_vocab_size);
         config_.audio_vocab_size = c.value("audio_vocab_size", config_.audio_vocab_size);

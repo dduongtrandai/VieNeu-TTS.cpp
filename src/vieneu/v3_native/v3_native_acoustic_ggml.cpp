@@ -225,7 +225,13 @@ public:
         gate_weight_direct_ = gate_weight;
         up_weight_direct_ = up_weight;
         down_weight_direct_ = down_weight;
-        use_direct_ = use_direct_linear_backend();
+        use_q8_ = env_flag_enabled("VIENEU_ACOUSTIC_Q8_FFN", true);
+        const int64_t q8_block = ggml_blck_size(GGML_TYPE_Q8_0);
+        if (use_q8_ && (hidden_dim_ % q8_block != 0 || intermediate_dim_ % q8_block != 0)) {
+            use_q8_ = false;
+        }
+
+        use_direct_ = !use_q8_ && use_direct_linear_backend();
         if (use_direct_) {
             gate_direct_.resize(static_cast<size_t>(intermediate_dim_));
             up_direct_.resize(static_cast<size_t>(intermediate_dim_));
@@ -233,9 +239,10 @@ public:
             return;
         }
 
+        const ggml_type weight_type = use_q8_ ? GGML_TYPE_Q8_0 : GGML_TYPE_F32;
         const size_t weight_bytes =
-            2 * static_cast<size_t>(intermediate_dim_) * hidden_dim_ * sizeof(float) +
-            static_cast<size_t>(hidden_dim_) * intermediate_dim_ * sizeof(float);
+            2 * ggml_row_size(weight_type, hidden_dim_) * static_cast<size_t>(intermediate_dim_) +
+            ggml_row_size(weight_type, intermediate_dim_) * static_cast<size_t>(hidden_dim_);
         const size_t activation_bytes =
             static_cast<size_t>(hidden_dim_ + 4 * intermediate_dim_) * sizeof(float);
         ggml_init_params params = {
@@ -248,9 +255,9 @@ public:
             throw std::runtime_error("failed to initialize ggml context for ffn.");
         }
 
-        gate_weight_ = ggml_new_tensor_2d(ctx_, GGML_TYPE_F32, hidden_dim_, intermediate_dim_);
-        up_weight_ = ggml_new_tensor_2d(ctx_, GGML_TYPE_F32, hidden_dim_, intermediate_dim_);
-        down_weight_ = ggml_new_tensor_2d(ctx_, GGML_TYPE_F32, intermediate_dim_, hidden_dim_);
+        gate_weight_ = ggml_new_tensor_2d(ctx_, weight_type, hidden_dim_, intermediate_dim_);
+        up_weight_ = ggml_new_tensor_2d(ctx_, weight_type, hidden_dim_, intermediate_dim_);
+        down_weight_ = ggml_new_tensor_2d(ctx_, weight_type, intermediate_dim_, hidden_dim_);
         input_ = ggml_new_tensor_1d(ctx_, GGML_TYPE_F32, hidden_dim_);
 
         ggml_tensor* gate = ggml_mul_mat(ctx_, gate_weight_, input_);
@@ -262,9 +269,15 @@ public:
         graph_ = ggml_new_graph(ctx_);
         ggml_build_forward_expand(graph_, output_);
 
-        std::memcpy(gate_weight_->data, gate_weight, static_cast<size_t>(intermediate_dim_) * hidden_dim_ * sizeof(float));
-        std::memcpy(up_weight_->data, up_weight, static_cast<size_t>(intermediate_dim_) * hidden_dim_ * sizeof(float));
-        std::memcpy(down_weight_->data, down_weight, static_cast<size_t>(hidden_dim_) * intermediate_dim_ * sizeof(float));
+        if (use_q8_) {
+            ggml_quantize_chunk(GGML_TYPE_Q8_0, gate_weight, gate_weight_->data, 0, intermediate_dim_, hidden_dim_, nullptr);
+            ggml_quantize_chunk(GGML_TYPE_Q8_0, up_weight, up_weight_->data, 0, intermediate_dim_, hidden_dim_, nullptr);
+            ggml_quantize_chunk(GGML_TYPE_Q8_0, down_weight, down_weight_->data, 0, hidden_dim_, intermediate_dim_, nullptr);
+        } else {
+            std::memcpy(gate_weight_->data, gate_weight, static_cast<size_t>(intermediate_dim_) * hidden_dim_ * sizeof(float));
+            std::memcpy(up_weight_->data, up_weight, static_cast<size_t>(intermediate_dim_) * hidden_dim_ * sizeof(float));
+            std::memcpy(down_weight_->data, down_weight, static_cast<size_t>(hidden_dim_) * intermediate_dim_ * sizeof(float));
+        }
         plan_ = ggml_graph_plan(graph_, thread_count_, nullptr);
         work_data_.resize(plan_.work_size);
         plan_.work_data = work_data_.empty() ? nullptr : work_data_.data();
@@ -311,6 +324,7 @@ private:
         gate_direct_.clear();
         up_direct_.clear();
         fused_direct_.clear();
+        use_q8_ = false;
         use_direct_ = true;
     }
 
@@ -332,6 +346,7 @@ private:
     int hidden_dim_ = 0;
     int intermediate_dim_ = 0;
     int thread_count_ = 1;
+    bool use_q8_ = false;
     bool use_direct_ = true;
 };
 

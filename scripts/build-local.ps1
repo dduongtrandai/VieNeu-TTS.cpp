@@ -21,13 +21,14 @@ param (
 
 $ErrorActionPreference = "Stop"
 $PSScriptRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
+$ProjectRoot = Split-Path -Parent -Path $PSScriptRoot
 
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Starting Local Build Setup for VieNeu TTS..." -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
 # 1. Check and Clone llama.cpp if missing
-$LlamaDir = Join-Path $PSScriptRoot "llama.cpp"
+$LlamaDir = Join-Path $ProjectRoot "llama.cpp"
 if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
     Write-Host "llama.cpp source not found. Cloning ggml-org/llama.cpp..." -ForegroundColor Yellow
     git clone --depth 1 $LlamaCppRepo $LlamaDir
@@ -36,7 +37,7 @@ if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
 }
 
 # 2. Check and Download ONNX Runtime SDK if missing
-$OrtSdkDir = Join-Path $PSScriptRoot "ort_sdk"
+$OrtSdkDir = Join-Path $ProjectRoot "ort_sdk"
 
 function Expand-NuGetPackage([string]$PackageId, [string]$Version, [string]$DestinationRoot) {
     if (Test-Path $DestinationRoot) {
@@ -134,17 +135,17 @@ if ($Generator -eq "Ninja") {
     if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
         Write-Host "Ninja is selected but not found in PATH. Downloading ninja.exe..." -ForegroundColor Yellow
         $NinjaUrl = "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
-        $NinjaZip = Join-Path $PSScriptRoot "ninja-win.zip"
+        $NinjaZip = Join-Path $ProjectRoot "ninja-win.zip"
         
         Write-Host "Downloading Ninja from $NinjaUrl..." -ForegroundColor Cyan
         Invoke-WebRequest -Uri $NinjaUrl -OutFile $NinjaZip
         
         Write-Host "Extracting Ninja..." -ForegroundColor Cyan
-        Expand-Archive -Path $NinjaZip -DestinationPath $PSScriptRoot -Force
+        Expand-Archive -Path $NinjaZip -DestinationPath $ProjectRoot -Force
         Remove-Item $NinjaZip -Force
         
-        # Add the script folder to PATH environment variable for the current session
-        $env:PATH = "$PSScriptRoot;" + $env:PATH
+        # Add the project root folder to PATH environment variable for the current session
+        $env:PATH = "$ProjectRoot;" + $env:PATH
         Write-Host "Ninja successfully installed in current path." -ForegroundColor Green
     } else {
         Write-Host "Ninja tool is available in PATH." -ForegroundColor Green
@@ -152,7 +153,7 @@ if ($Generator -eq "Ninja") {
 }
 
 # 5. Clean build directory if requested
-$BuildPath = Join-Path $PSScriptRoot "build"
+$BuildPath = Join-Path $ProjectRoot "build"
 if ($Clean -and (Test-Path $BuildPath)) {
     Write-Host "Cleaning build directory..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force $BuildPath
@@ -161,12 +162,12 @@ if ($Clean -and (Test-Path $BuildPath)) {
 # 6. Configure CMake
 Write-Host "Configuring CMake..." -ForegroundColor Cyan
 $cmakeArgs = @(
-    "-B", "build",
-    "-S", ".",
+    "-B", $BuildPath,
+    "-S", $ProjectRoot,
     "-G", $Generator,
     "-DCMAKE_BUILD_TYPE=Release",
     "-DVIENEU_PORTABLE_CPU=$($PortableCpu.IsPresent)",
-    "-DVIENEU_LLAMA_DIR=llama.cpp",
+    "-DVIENEU_LLAMA_DIR=$LlamaDir",
     "-DONNXRUNTIME_ROOT=$OrtRoot"
 )
 
@@ -187,7 +188,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # 7. Build the Project
 Write-Host "Building project..." -ForegroundColor Cyan
-& cmake --build build --config Release --parallel
+& cmake --build $BuildPath --config Release --parallel
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Build failed."
 }
@@ -220,9 +221,10 @@ foreach ($root in $OrtRuntimeRoots) {
 # 9. Package the runtime if not disabled
 if (-not $NoPackage) {
     Write-Host "Packaging runtime..." -ForegroundColor Cyan
-    $PackageScript = Join-Path $PSScriptRoot "scripts/package-runtime.ps1"
+    $PackageScript = Join-Path $PSScriptRoot "package-runtime.ps1"
     if (Test-Path $PackageScript) {
-        & $PackageScript -BuildDir "build" -OutputDir "dist" -OnnxRuntimeRoot $OrtRoot -RuntimeFlavor $OnnxRuntimeFlavor -OnnxRuntimeVersion $SelectedOnnxRuntimeVersion -RuntimeVersion "local"
+        $OutputDir = Join-Path $ProjectRoot "dist"
+        & $PackageScript -BuildDir $BuildPath -OutputDir $OutputDir -OnnxRuntimeRoot $OrtRoot -RuntimeFlavor $OnnxRuntimeFlavor -OnnxRuntimeVersion $SelectedOnnxRuntimeVersion -RuntimeVersion "local"
     } else {
         Write-Warning "Could not find package script at $PackageScript"
     }

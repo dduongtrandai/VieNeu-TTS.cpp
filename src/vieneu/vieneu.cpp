@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
@@ -443,6 +444,60 @@ static bool try_python_vieneu_phonemizer(const std::string& text, std::string& o
     return false;
 }
 
+static std::string ascii_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+static bool consume_emotion_marker(const std::string& text, size_t pos, std::string& token, size_t& consumed) {
+    if (text.compare(pos, 10, "<|emotion_") == 0) {
+        const size_t end = text.find("|>", pos + 10);
+        if (end != std::string::npos) {
+            token = text.substr(pos, end + 2 - pos);
+            consumed = token.size();
+            return true;
+        }
+    }
+
+    if (pos >= text.size() || text[pos] != '[') {
+        return false;
+    }
+    const size_t end = text.find(']', pos + 1);
+    if (end == std::string::npos) {
+        return false;
+    }
+
+    std::string inner = text.substr(pos + 1, end - pos - 1);
+    while (!inner.empty() && std::isspace(static_cast<unsigned char>(inner.front()))) {
+        inner.erase(inner.begin());
+    }
+    while (!inner.empty() && std::isspace(static_cast<unsigned char>(inner.back()))) {
+        inner.pop_back();
+    }
+    const std::string key = ascii_lower_copy(inner);
+    if (key == "chuckle" || key == "cuoi" || key == u8"cười") {
+        token = "<|emotion_1|>";
+    } else if (key == "sigh" || key == "tho dai" || key == u8"thở dài") {
+        token = "<|emotion_2|>";
+    } else if (key == "clear throat" || key == "hang giong" || key == u8"hắng giọng") {
+        token = "<|emotion_3|>";
+    } else {
+        return false;
+    }
+    consumed = end + 1 - pos;
+    return true;
+}
+
+static void append_emotion_token(std::stringstream& ss, const std::string& token) {
+    const std::streampos pos = ss.tellp();
+    if (pos > 0) {
+        ss << ' ';
+    }
+    ss << token;
+}
+
 std::string VieneuProfile::format_prompt(const std::string& phonemes) {
     return "<|speaker_16|><|TEXT_PROMPT_START|>" + phonemes + "<|TEXT_PROMPT_END|><|SPEECH_GENERATION_START|>";
 }
@@ -672,6 +727,18 @@ std::string VieneuProfile::phonemize(const std::string& text) {
 
     // Syllabify text
     for (size_t i = 0; i < text.size(); ++i) {
+        std::string emotion_token;
+        size_t emotion_consumed = 0;
+        if (consume_emotion_marker(text, i, emotion_token, emotion_consumed)) {
+            if (!word.empty()) {
+                ss << process_single_word(word);
+                word = "";
+            }
+            append_emotion_token(ss, emotion_token);
+            i += emotion_consumed - 1;
+            continue;
+        }
+
         char c = text[i];
         if (is_punc(c)) {
             if (!word.empty()) {

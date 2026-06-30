@@ -71,6 +71,10 @@ int main() {
     }
 
     const std::string emotion = VieneuProfile::phonemize(u8"[cười] Trời ơi, nghe giống người thật quá!");
+    failed += require_contains(
+        emotion,
+        "<|emotion_1|>",
+        "VieNeu phonemizer did not preserve [cười] as <|emotion_1|>.");
     if (require_python_backend) {
         failed += require_contains(
             emotion,

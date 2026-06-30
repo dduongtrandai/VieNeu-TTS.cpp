@@ -21,6 +21,9 @@ struct V3NativeConfig {
     int speech_generation_end_token_id = 6;
     int audio_ref_slot_token_id = 7;
     int emotion_0_token_id = 8;
+    int emotion_1_token_id = 9;
+    int emotion_2_token_id = 10;
+    int emotion_3_token_id = 11;
     int emotion_4_token_id = 12;
     int text_vocab_size = 389; // text_vocab_size can be dynamically populated from config.json
     int audio_vocab_size = 1024;

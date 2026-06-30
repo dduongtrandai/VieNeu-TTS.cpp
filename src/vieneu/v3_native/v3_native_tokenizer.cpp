@@ -72,8 +72,23 @@ bool V3NativeTokenizer::load(const std::string& path, std::string& error) {
         const auto& model = doc.at("model");
         vocab_.clear();
         merge_ranks_.clear();
+        special_tokens_.clear();
         for (auto it = model.at("vocab").begin(); it != model.at("vocab").end(); ++it) {
             vocab_[it.key()] = it.value().get<int64_t>();
+        }
+        if (doc.contains("added_tokens") && doc.at("added_tokens").is_array()) {
+            for (const auto& token : doc.at("added_tokens")) {
+                if (!token.value("special", false) || !token.contains("content")) {
+                    continue;
+                }
+                const std::string content = token.at("content").get<std::string>();
+                if (vocab_.find(content) != vocab_.end()) {
+                    special_tokens_.push_back(content);
+                }
+            }
+            std::sort(special_tokens_.begin(), special_tokens_.end(), [](const std::string& a, const std::string& b) {
+                return a.size() > b.size();
+            });
         }
         if (model.contains("unk_token")) {
             const std::string unk = model.at("unk_token").get<std::string>();
@@ -101,7 +116,7 @@ bool V3NativeTokenizer::load(const std::string& path, std::string& error) {
     }
 }
 
-std::vector<int64_t> V3NativeTokenizer::encode(const std::string& text) const {
+std::vector<int64_t> V3NativeTokenizer::encode_ordinary(const std::string& text) const {
     std::vector<std::string> word = byte_level_symbols(text);
     if (word.empty()) {
         return {};
@@ -129,5 +144,51 @@ std::vector<int64_t> V3NativeTokenizer::encode(const std::string& text) const {
         auto it = vocab_.find(token);
         ids.push_back(it == vocab_.end() ? unk_id_ : it->second);
     }
+    return ids;
+}
+
+std::vector<int64_t> V3NativeTokenizer::encode(const std::string& text) const {
+    if (text.empty()) {
+        return {};
+    }
+    if (special_tokens_.empty()) {
+        return encode_ordinary(text);
+    }
+
+    std::vector<int64_t> ids;
+    std::string ordinary;
+    ordinary.reserve(text.size());
+
+    auto flush_ordinary = [&]() {
+        if (ordinary.empty()) {
+            return;
+        }
+        std::vector<int64_t> part_ids = encode_ordinary(ordinary);
+        ids.insert(ids.end(), part_ids.begin(), part_ids.end());
+        ordinary.clear();
+    };
+
+    for (size_t i = 0; i < text.size();) {
+        const std::string* matched = nullptr;
+        for (const std::string& token : special_tokens_) {
+            if (token.empty() || i + token.size() > text.size()) {
+                continue;
+            }
+            if (text.compare(i, token.size(), token) == 0) {
+                matched = &token;
+                break;
+            }
+        }
+        if (matched) {
+            flush_ordinary();
+            auto it = vocab_.find(*matched);
+            ids.push_back(it == vocab_.end() ? unk_id_ : it->second);
+            i += matched->size();
+        } else {
+            ordinary.push_back(text[i]);
+            ++i;
+        }
+    }
+    flush_ordinary();
     return ids;
 }

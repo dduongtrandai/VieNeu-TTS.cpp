@@ -22,7 +22,8 @@ param(
     [switch]$UseDirectLinear,
     [switch]$UseGgmlLinear,
     [switch]$DisableGgmlHeads,
-    [switch]$NoFuseFfn
+    [switch]$NoFuseFfn,
+    [switch]$DisableQ8Ffn
 )
 
 Set-StrictMode -Version Latest
@@ -66,7 +67,28 @@ function Find-CMake {
     throw "Cannot find cmake.exe. Install CMake or Visual Studio CMake tools, then rerun this script."
 }
 
+function Find-OnnxRuntimeRoot {
+    if (![string]::IsNullOrWhiteSpace($OnnxRuntimeRoot)) {
+        return (Resolve-RepoPath $OnnxRuntimeRoot)
+    }
+
+    $ortSdkDir = Join-Path $RepoRoot "ort_sdk"
+    if (Test-Path $ortSdkDir) {
+        $candidate = Get-ChildItem -LiteralPath $ortSdkDir -Directory -Filter "onnxruntime-win-x64-*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+        if ($candidate) {
+            return $candidate.FullName
+        }
+    }
+
+    return ""
+}
+
 function Find-Cli {
+    if (!$NoBuild) {
+        return (Join-Path $BuildDir "Release\vieneu-tts-cli.exe")
+    }
     foreach ($path in $CliCandidates) {
         if (Test-Path $path) {
             return $path
@@ -76,7 +98,7 @@ function Find-Cli {
 }
 
 function Ensure-Built([string]$CliExe) {
-    if (Test-Path $CliExe) {
+    if ($NoBuild -and (Test-Path $CliExe)) {
         return
     }
     if ($NoBuild) {
@@ -85,6 +107,7 @@ function Ensure-Built([string]$CliExe) {
 
     $cmake = Find-CMake
     $resolvedLlamaDir = Resolve-RepoPath $LlamaDir
+    $resolvedOrtRoot = Find-OnnxRuntimeRoot
     if (!(Test-Path (Join-Path $resolvedLlamaDir "CMakeLists.txt"))) {
         throw "llama.cpp was not found at $resolvedLlamaDir."
     }
@@ -97,8 +120,8 @@ function Ensure-Built([string]$CliExe) {
         "-DVIENEU_LLAMA_DIR=$resolvedLlamaDir"
     )
 
-    if (![string]::IsNullOrWhiteSpace($OnnxRuntimeRoot)) {
-        $configureArgs += "-DONNXRUNTIME_ROOT=$(Resolve-RepoPath $OnnxRuntimeRoot)"
+    if (![string]::IsNullOrWhiteSpace($resolvedOrtRoot)) {
+        $configureArgs += "-DONNXRUNTIME_ROOT=$resolvedOrtRoot"
     }
 
     Write-Step "Configuring runtime"
@@ -135,7 +158,7 @@ function Copy-RuntimeDlls([string]$CliExe) {
         Copy-Item -LiteralPath $dllSrc -Destination $exeDir -Force
     }
 
-    $resolvedOrt = Resolve-RepoPath $OnnxRuntimeRoot
+    $resolvedOrt = Find-OnnxRuntimeRoot
     if (![string]::IsNullOrWhiteSpace($resolvedOrt) -and (Test-Path $resolvedOrt)) {
         foreach ($ortLib in @(
             (Join-Path $resolvedOrt "lib"),
@@ -246,6 +269,7 @@ try {
     $oldAcousticGgml = $env:VIENEU_ACOUSTIC_GGML_LINEAR
     $oldGgmlHeads = $env:VIENEU_ACOUSTIC_GGML_HEADS
     $oldFuseFfn = $env:VIENEU_GGML_FUSE_FFN
+    $oldQ8Ffn = $env:VIENEU_ACOUSTIC_Q8_FFN
     try {
         $env:VIENEU_V3_NATIVE_BENCHMARK = if ($NoBenchmark) { "0" } else { "1" }
         if ($UseGgmlLinear) {
@@ -257,6 +281,7 @@ try {
         }
         $env:VIENEU_ACOUSTIC_GGML_HEADS = if ($DisableGgmlHeads) { "0" } else { "1" }
         $env:VIENEU_GGML_FUSE_FFN = if ($NoFuseFfn) { "0" } else { "1" }
+        $env:VIENEU_ACOUSTIC_Q8_FFN = if ($DisableQ8Ffn) { "0" } else { "1" }
 
         Write-Step "Running vieneu-v3-native benchmark"
         $displayArgs = $argsList -join " "
@@ -306,6 +331,7 @@ try {
         $env:VIENEU_ACOUSTIC_GGML_LINEAR = $oldAcousticGgml
         $env:VIENEU_ACOUSTIC_GGML_HEADS = $oldGgmlHeads
         $env:VIENEU_GGML_FUSE_FFN = $oldFuseFfn
+        $env:VIENEU_ACOUSTIC_Q8_FFN = $oldQ8Ffn
     }
 } finally {
     Pop-Location

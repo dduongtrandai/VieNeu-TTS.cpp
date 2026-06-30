@@ -15,8 +15,11 @@ public:
     int64_t unk_id() const { return unk_id_; }
 
 private:
+    std::vector<int64_t> encode_ordinary(const std::string& text) const;
+
     std::unordered_map<std::string, int64_t> vocab_;
     std::unordered_map<std::string, int> merge_ranks_;
+    std::vector<std::string> special_tokens_;
     int64_t unk_id_ = 43;
 };
 

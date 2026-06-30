@@ -40,6 +40,12 @@ static bool env_flag_enabled_local(const char* name) {
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
 }
 
+static bool contains_v3_emotion_token(const std::string& text) {
+    return text.find("<|emotion_1|>") != std::string::npos ||
+           text.find("<|emotion_2|>") != std::string::npos ||
+           text.find("<|emotion_3|>") != std::string::npos;
+}
+
 static int effective_chunk_chars_for_frame_budget(int requested_max_chars, int max_new_frames) {
     const int max_chars = (std::max)(16, requested_max_chars);
     if (max_new_frames <= 0) {
@@ -177,8 +183,20 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
     }
 
     const int silence_samples = static_cast<int>(std::lround(static_cast<double>(sample_rate()) * 0.15));
+    const bool debug_tags = env_flag_enabled_local("VIENEU_V3_NATIVE_DEBUG_TAGS");
     for (size_t i = 0; i < chunks.size(); ++i) {
         const std::string phonemes = phonemize_for_v3(chunks[i]);
+        if (debug_tags || contains_v3_emotion_token(phonemes)) {
+            const std::vector<int64_t> phone_ids = tokenizer_.encode(phonemes);
+            std::cerr << "[V3NativeTags] chunk " << (i + 1) << "/" << chunks.size()
+                      << " text=\"" << chunks[i] << "\"\n";
+            std::cerr << "[V3NativeTags] phonemes=\"" << phonemes << "\"\n";
+            std::cerr << "[V3NativeTags] phone_ids=";
+            for (const int64_t id : phone_ids) {
+                std::cerr << id << ' ';
+            }
+            std::cerr << "\n";
+        }
         std::vector<float> chunk_audio;
         if (!synthesize_phonemes(phonemes, p_ref_codes, leading_token, params, chunk_audio, error)) {
             if (chunks.size() > 1) {
