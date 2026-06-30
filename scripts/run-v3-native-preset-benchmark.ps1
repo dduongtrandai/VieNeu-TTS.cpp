@@ -17,13 +17,13 @@ param(
     [string]$VoicesJson = "",
     [string]$OnnxRuntimeRoot = "",
     [string]$LlamaDir = "third_party\llama.cpp",
-    [switch]$NoBuild = $true,
-    [switch]$NoBenchmark = $true,
+    [switch]$NoBuild,
+    [switch]$NoBenchmark,
     [switch]$UseDirectLinear,
     [switch]$UseGgmlLinear,
-    [bool]$GgmlHeads = $true,
-    [bool]$FuseFfn = $true,
-    [bool]$Q8Ffn = $false
+    [switch]$DisableGgmlHeads,
+    [switch]$NoFuseFfn,
+    [switch]$DisableQ8Ffn
 )
 
 Set-StrictMode -Version Latest
