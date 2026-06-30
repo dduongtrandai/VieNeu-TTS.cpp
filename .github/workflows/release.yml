@@ -21,17 +21,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             platform: linux
             backend: cpu
             package_flavor: cpu
             archive: vieneu-tts-linux-cpu.tar.gz
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             platform: linux
             backend: cuda
             package_flavor: cuda-12
             archive: vieneu-tts-linux-cuda-12.tar.gz
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             platform: linux
             backend: vulkan
             package_flavor: vulkan
