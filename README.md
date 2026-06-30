@@ -2,7 +2,7 @@
 
 Native C++ runtime for [VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS), focused on local Vietnamese text-to-speech inference, voice presets, and zero-shot voice cloning.
 
-[Model on Hugging Face](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) · [Original VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) · [llama.cpp](https://github.com/ggml-org/llama.cpp) · [ONNX Runtime](https://onnxruntime.ai/)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Models-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) [![GitHub](https://img.shields.io/badge/GitHub-Original%20VieNeu--TTS-181717?logo=github)](https://github.com/pnnbao97/VieNeu-TTS) [![llama.cpp](https://img.shields.io/badge/llama.cpp-ggml-0052cc)](https://github.com/ggml-org/llama.cpp) [![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-Inference-blue)](https://onnxruntime.ai/)
 
 ## Highlights
 
