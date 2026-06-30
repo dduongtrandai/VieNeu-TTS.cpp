@@ -24,7 +24,7 @@ The reference execution order is:
 ```text
 text
   -> normalize_to_chunks_v3
-  -> phonemize_text_with_emotions
+  -> phonemize text with emotion markers
   -> build_prompt_2d(text phonemes + optional ref MOSS codes)
   -> _build_inputs_embeds(text embedding + per-channel audio embeddings)
   -> semantic_backbone prefill(inputs_embeds, use_cache=True)

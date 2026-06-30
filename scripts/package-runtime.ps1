@@ -229,16 +229,28 @@ $dependencyPatterns = @(
     "libllama.*",
     "llama.dll",
     "libggml*",
-    "ggml*.dll"
+    "ggml*.dll",
+    "sea_g2p_rs.dll",
+    "libsea_g2p_rs.so*",
+    "libsea_g2p_rs.dylib"
 )
 Copy-RuntimePatterns -Roots $runtimeRoots -Patterns $dependencyPatterns -DestinationDir $StagingDir
+
+$SeaG2pDictCandidates = @(
+    (Join-Path $ProjectRoot "third_party/sea-g2p/python/sea_g2p/sea_g2p.bin")
+)
+$SeaG2pDict = $SeaG2pDictCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($SeaG2pDict) {
+    Copy-RuntimeFile -SourcePath $SeaG2pDict -DestinationDir $StagingDir
+}
 
 $LicensesDir = Join-Path $StagingDir "LICENSES"
 New-Item -ItemType Directory -Path $LicensesDir | Out-Null
 $LicenseFiles = @(
     (Join-Path $ProjectRoot "LICENSE"),
     (Join-Path $ProjectRoot "README.md"),
-    (Join-Path (Join-Path (Join-Path $ProjectRoot "third_party") "llama.cpp") "LICENSE")
+    (Join-Path (Join-Path (Join-Path $ProjectRoot "third_party") "llama.cpp") "LICENSE"),
+    (Join-Path (Join-Path (Join-Path $ProjectRoot "third_party") "sea-g2p") "LICENSE")
 )
 foreach ($lf in $LicenseFiles) {
     if (Test-Path $lf) {

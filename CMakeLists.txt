@@ -18,8 +18,10 @@ endif()
 
 # Configuration Options
 set(VIENEU_LLAMA_DIR "third_party/llama.cpp" CACHE PATH "Path to llama.cpp source directory")
+set(VIENEU_SEA_G2P_DIR "third_party/sea-g2p" CACHE PATH "Path to sea-g2p source directory")
 set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to ONNX Runtime SDK root")
 option(VIENEU_PORTABLE_CPU "Build portable CPU kernels instead of host-native SIMD kernels" OFF)
+option(VIENEU_SEA_G2P "Build and link the native Rust sea-g2p phonemizer" OFF)
 set(VIENEU_NATIVE_BACKEND "cpu" CACHE STRING "Native ggml backend to build: cpu, cuda, vulkan, or metal")
 set_property(CACHE VIENEU_NATIVE_BACKEND PROPERTY STRINGS "cpu" "cuda" "vulkan" "metal")
 
@@ -77,6 +79,70 @@ set(LLAMA_BUILD_APP OFF CACHE BOOL "Do not build llama.cpp app" FORCE)
 set(LLAMA_BUILD_UI OFF CACHE BOOL "Do not build llama.cpp UI" FORCE)
 set(LLAMA_USE_PREBUILT_UI OFF CACHE BOOL "Do not fetch llama.cpp prebuilt UI" FORCE)
 add_subdirectory(${VIENEU_LLAMA_DIR} llama_cpp_build EXCLUDE_FROM_ALL)
+
+if(VIENEU_SEA_G2P)
+    if(NOT IS_ABSOLUTE "${VIENEU_SEA_G2P_DIR}")
+        get_filename_component(VIENEU_SEA_G2P_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${VIENEU_SEA_G2P_DIR}" ABSOLUTE)
+    endif()
+    if(NOT EXISTS "${VIENEU_SEA_G2P_DIR}/Cargo.toml")
+        message(FATAL_ERROR "sea-g2p Cargo.toml not found at ${VIENEU_SEA_G2P_DIR}")
+    endif()
+    if(NOT EXISTS "${VIENEU_SEA_G2P_DIR}/include/sea_g2p.h")
+        message(FATAL_ERROR "sea-g2p C ABI header not found at ${VIENEU_SEA_G2P_DIR}/include/sea_g2p.h")
+    endif()
+    if(NOT EXISTS "${VIENEU_SEA_G2P_DIR}/python/sea_g2p/sea_g2p.bin")
+        message(FATAL_ERROR "sea-g2p dictionary not found at ${VIENEU_SEA_G2P_DIR}/python/sea_g2p/sea_g2p.bin")
+    endif()
+
+    find_program(CARGO_EXECUTABLE cargo REQUIRED)
+    set(VIENEU_SEA_G2P_TARGET_DIR "${CMAKE_BINARY_DIR}/sea-g2p")
+    if(WIN32)
+        set(VIENEU_SEA_G2P_RUNTIME_LIB "${VIENEU_SEA_G2P_TARGET_DIR}/release/sea_g2p_rs.dll")
+        set(VIENEU_SEA_G2P_IMPORT_LIB "${VIENEU_SEA_G2P_TARGET_DIR}/release/sea_g2p_rs.dll.lib")
+        set(VIENEU_SEA_G2P_LINK_LIB "${VIENEU_SEA_G2P_IMPORT_LIB}")
+    elseif(APPLE)
+        set(VIENEU_SEA_G2P_RUNTIME_LIB "${VIENEU_SEA_G2P_TARGET_DIR}/release/libsea_g2p_rs.dylib")
+        set(VIENEU_SEA_G2P_IMPORT_LIB "${VIENEU_SEA_G2P_RUNTIME_LIB}")
+        set(VIENEU_SEA_G2P_LINK_LIB "${VIENEU_SEA_G2P_RUNTIME_LIB}")
+    else()
+        set(VIENEU_SEA_G2P_RUNTIME_LIB "${VIENEU_SEA_G2P_TARGET_DIR}/release/libsea_g2p_rs.so")
+        set(VIENEU_SEA_G2P_IMPORT_LIB "${VIENEU_SEA_G2P_RUNTIME_LIB}")
+        set(VIENEU_SEA_G2P_LINK_LIB "${VIENEU_SEA_G2P_RUNTIME_LIB}")
+    endif()
+
+    if(WIN32)
+        add_custom_command(
+            OUTPUT "${VIENEU_SEA_G2P_RUNTIME_LIB}"
+            BYPRODUCTS "${VIENEU_SEA_G2P_IMPORT_LIB}"
+            COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${VIENEU_SEA_G2P_DIR}/Cargo.toml" --target-dir "${VIENEU_SEA_G2P_TARGET_DIR}"
+            WORKING_DIRECTORY "${VIENEU_SEA_G2P_DIR}"
+            COMMENT "Building native sea-g2p Rust library"
+            VERBATIM
+        )
+    else()
+        add_custom_command(
+            OUTPUT "${VIENEU_SEA_G2P_RUNTIME_LIB}"
+            COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${VIENEU_SEA_G2P_DIR}/Cargo.toml" --target-dir "${VIENEU_SEA_G2P_TARGET_DIR}"
+            WORKING_DIRECTORY "${VIENEU_SEA_G2P_DIR}"
+            COMMENT "Building native sea-g2p Rust library"
+            VERBATIM
+        )
+    endif()
+    add_custom_target(vieneu-sea-g2p-rust DEPENDS "${VIENEU_SEA_G2P_RUNTIME_LIB}")
+    add_library(vieneu-sea-g2p SHARED IMPORTED GLOBAL)
+    set_target_properties(vieneu-sea-g2p PROPERTIES
+        IMPORTED_LOCATION "${VIENEU_SEA_G2P_RUNTIME_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${VIENEU_SEA_G2P_DIR}/include"
+    )
+    if(WIN32)
+        set_target_properties(vieneu-sea-g2p PROPERTIES
+            IMPORTED_IMPLIB "${VIENEU_SEA_G2P_IMPORT_LIB}"
+        )
+    endif()
+    message(STATUS "VieNeu sea-g2p phonemizer: ON (${VIENEU_SEA_G2P_DIR})")
+else()
+    message(STATUS "VieNeu sea-g2p phonemizer: OFF")
+endif()
 
 # Find ONNX Runtime dependency
 unset(ONNXRUNTIME_LIB CACHE)
@@ -161,6 +227,14 @@ target_link_libraries(vieneu-tts-core PUBLIC
 if(OpenMP_CXX_FOUND)
     target_link_libraries(vieneu-tts-core PUBLIC OpenMP::OpenMP_CXX)
 endif()
+if(VIENEU_SEA_G2P)
+    add_dependencies(vieneu-tts-core vieneu-sea-g2p-rust)
+    target_compile_definitions(vieneu-tts-core PRIVATE
+        VIENEU_USE_SEA_G2P
+        VIENEU_SEA_G2P_DEFAULT_DICT="${VIENEU_SEA_G2P_DIR}/python/sea_g2p/sea_g2p.bin"
+    )
+    target_link_libraries(vieneu-tts-core PUBLIC vieneu-sea-g2p)
+endif()
 
 # Shared library for ABI consumers (vieneu-tts.dll)
 add_library(vieneu-tts SHARED
@@ -171,6 +245,15 @@ target_include_directories(vieneu-tts PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+if(VIENEU_SEA_G2P)
+    add_custom_command(TARGET vieneu-tts POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VIENEU_SEA_G2P_RUNTIME_LIB}"
+            "$<TARGET_FILE_DIR:vieneu-tts>"
+        COMMENT "Copying sea-g2p runtime library next to vieneu-tts"
+        VERBATIM
+    )
+endif()
 
 # Export options for shared library on Windows
 if(MSVC)

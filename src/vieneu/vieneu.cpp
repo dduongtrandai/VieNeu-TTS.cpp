@@ -5,13 +5,13 @@
 #include <algorithm>
 #include <sstream>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <cctype>
+#ifdef VIENEU_USE_SEA_G2P
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
-#include <unordered_map>
-
+#include "sea_g2p.h"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,8 +20,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #else
 #include <unistd.h>
+#endif
 #endif
 
 // UTF-8 Helper Functions
@@ -161,12 +164,16 @@ static bool has_vietnamese_signal(const std::string& text) {
     return false;
 }
 
-static std::string getenv_string(const char* name) {
+#ifdef VIENEU_USE_SEA_G2P
+static bool consume_emotion_marker(const std::string& text, size_t pos, std::string& token, size_t& consumed);
+static void append_emotion_token(std::stringstream& ss, const std::string& token);
+
+static std::string vieneu_getenv_string(const char* name) {
     const char* value = std::getenv(name);
     return value ? std::string(value) : std::string();
 }
 
-static bool file_exists_local(const std::string& path) {
+static bool vieneu_file_exists(const std::string& path) {
     if (path.empty()) {
         return false;
     }
@@ -174,7 +181,7 @@ static bool file_exists_local(const std::string& path) {
     return fs.good();
 }
 
-static std::string dirname_local(std::string path) {
+static std::string vieneu_dirname(std::string path) {
     const size_t pos = path.find_last_of("/\\");
     if (pos == std::string::npos) {
         return {};
@@ -182,7 +189,7 @@ static std::string dirname_local(std::string path) {
     return path.substr(0, pos);
 }
 
-static std::string join_path_local(const std::string& a, const std::string& b) {
+static std::string vieneu_join_path(const std::string& a, const std::string& b) {
     if (a.empty()) {
         return b;
     }
@@ -197,252 +204,172 @@ static std::string join_path_local(const std::string& a, const std::string& b) {
 #endif
 }
 
-static std::string quote_shell_arg(const std::string& value) {
+static std::string vieneu_executable_dir() {
 #ifdef _WIN32
-    std::string out = "\"";
-    for (char c : value) {
-        if (c == '"') {
-            out += "\\\"";
-        } else {
-            out.push_back(c);
-        }
-    }
-    out.push_back('"');
-    return out;
-#else
-    std::string out = "'";
-    for (char c : value) {
-        if (c == '\'') {
-            out += "'\\''";
-        } else {
-            out.push_back(c);
-        }
-    }
-    out.push_back('\'');
-    return out;
-#endif
-}
-
-static std::string make_temp_text_path() {
-#ifdef _WIN32
-    char temp_dir[MAX_PATH + 1] = {};
-    const DWORD dir_len = GetTempPathA(MAX_PATH, temp_dir);
-    if (dir_len == 0 || dir_len > MAX_PATH) {
+    char path[MAX_PATH + 1] = {};
+    const DWORD len = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
         return {};
     }
-    char temp_file[MAX_PATH + 1] = {};
-    if (GetTempFileNameA(temp_dir, "vng", 0, temp_file) == 0) {
+    return vieneu_dirname(path);
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string path(size, '\0');
+    if (_NSGetExecutablePath(&path[0], &size) != 0) {
         return {};
     }
-    return temp_file;
+    path.resize(std::strlen(path.c_str()));
+    return vieneu_dirname(path);
 #else
-    char tmpl[] = "/tmp/vieneu-g2p-XXXXXX";
-    const int fd = mkstemp(tmpl);
-    if (fd < 0) {
+    char path[4096] = {};
+    const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len <= 0) {
         return {};
     }
-    close(fd);
-    return tmpl;
+    path[len] = '\0';
+    return vieneu_dirname(path);
 #endif
 }
 
-static std::vector<std::string> vieneu_repo_source_candidates() {
-    std::vector<std::string> out;
-    const std::string explicit_path = getenv_string("VIENEU_PYTHONPATH");
-    if (!explicit_path.empty()) {
-        out.push_back(explicit_path);
-    }
-    const std::string explicit_repo = getenv_string("VIENEU_REPO");
-    if (!explicit_repo.empty()) {
-        out.push_back(join_path_local(explicit_repo, "src"));
-    }
-    const std::string vieneu_repo = getenv_string("VIENEU_TTS_DIR");
-    if (!vieneu_repo.empty()) {
-        out.push_back(join_path_local(vieneu_repo, "src"));
+static std::string resolve_sea_g2p_dict_path() {
+    std::vector<std::string> candidates;
+    const std::string env_path = vieneu_getenv_string("VIENEU_SEA_G2P_DICT");
+    if (!env_path.empty()) {
+        candidates.push_back(env_path);
     }
 
-    const std::string source_file = __FILE__;
-    const std::string profile_dir = dirname_local(source_file);
-    const std::string src_dir = dirname_local(profile_dir);
-    const std::string project_dir = dirname_local(src_dir);
-    const std::string parent_dir = dirname_local(project_dir);
-    if (!parent_dir.empty()) {
-        out.push_back(join_path_local(join_path_local(parent_dir, "VieNeu-TTS"), "src"));
+    const std::string exe_dir = vieneu_executable_dir();
+    if (!exe_dir.empty()) {
+        candidates.push_back(vieneu_join_path(exe_dir, "sea_g2p.bin"));
+        candidates.push_back(vieneu_join_path(vieneu_join_path(exe_dir, "assets"), "sea_g2p.bin"));
+        candidates.push_back(vieneu_join_path(vieneu_join_path(exe_dir, "sea-g2p"), "sea_g2p.bin"));
     }
 
-    out.push_back(join_path_local("VieNeu-TTS", "src"));
-    out.push_back(join_path_local(join_path_local("..", "VieNeu-TTS"), "src"));
-    out.push_back(join_path_local(join_path_local(join_path_local("..", ".."), "VieNeu-TTS"), "src"));
-    return out;
-}
+    candidates.push_back("sea_g2p.bin");
+    candidates.push_back(vieneu_join_path("assets", "sea_g2p.bin"));
+    candidates.push_back(vieneu_join_path(vieneu_join_path("third_party", "sea-g2p"), vieneu_join_path(vieneu_join_path("python", "sea_g2p"), "sea_g2p.bin")));
 
-static std::vector<std::string> vieneu_python_candidates() {
-    std::vector<std::string> out;
-    const std::string explicit_python = getenv_string("VIENEU_PYTHON");
-    if (!explicit_python.empty()) {
-        out.push_back(explicit_python);
-    }
-    const std::string explicit_python_alt = getenv_string("VIENEU_TTS_PYTHON");
-    if (!explicit_python_alt.empty()) {
-        out.push_back(explicit_python_alt);
-    }
-    const std::string venv = getenv_string("VIRTUAL_ENV");
-    if (!venv.empty()) {
-#ifdef _WIN32
-        out.push_back(join_path_local(join_path_local(venv, "Scripts"), "python.exe"));
-#else
-        out.push_back(join_path_local(join_path_local(venv, "bin"), "python"));
+#ifdef VIENEU_SEA_G2P_DEFAULT_DICT
+    candidates.push_back(VIENEU_SEA_G2P_DEFAULT_DICT);
 #endif
-    }
 
-    const std::string source_file = __FILE__;
-    const std::string profile_dir = dirname_local(source_file);
-    const std::string src_dir = dirname_local(profile_dir);
-    const std::string project_dir = dirname_local(src_dir);
-    const std::string parent_dir = dirname_local(project_dir);
-    if (!parent_dir.empty()) {
-        const std::string vieneu_dir = join_path_local(parent_dir, "VieNeu-TTS");
-#ifdef _WIN32
-        out.push_back(join_path_local(join_path_local(join_path_local(vieneu_dir, ".venv"), "Scripts"), "python.exe"));
-#else
-        out.push_back(join_path_local(join_path_local(join_path_local(vieneu_dir, ".venv"), "bin"), "python"));
-#endif
-    }
-
-#ifdef _WIN32
-    out.push_back(join_path_local(join_path_local(join_path_local("VieNeu-TTS", ".venv"), "Scripts"), "python.exe"));
-    out.push_back(join_path_local(join_path_local(join_path_local(join_path_local("..", "VieNeu-TTS"), ".venv"), "Scripts"), "python.exe"));
-    out.push_back(join_path_local(join_path_local(join_path_local(join_path_local(join_path_local("..", ".."), "VieNeu-TTS"), ".venv"), "Scripts"), "python.exe"));
-    out.push_back("python");
-#else
-    out.push_back(join_path_local(join_path_local(join_path_local("VieNeu-TTS", ".venv"), "bin"), "python"));
-    out.push_back(join_path_local(join_path_local(join_path_local(join_path_local("..", "VieNeu-TTS"), ".venv"), "bin"), "python"));
-    out.push_back(join_path_local(join_path_local(join_path_local(join_path_local(join_path_local("..", ".."), "VieNeu-TTS"), ".venv"), "bin"), "python"));
-    out.push_back("python3");
-    out.push_back("python");
-#endif
-    return out;
-}
-
-static bool run_python_vieneu_phonemizer(const std::string& text, std::string& out) {
-    const bool debug = !getenv_string("VIENEU_PHONEMIZER_DEBUG").empty();
-    const std::string temp_path = make_temp_text_path();
-    if (temp_path.empty()) {
-        if (debug) {
-            std::cerr << "[VieNeu phonemizer] failed to allocate temp file\n";
+    for (const std::string& candidate : candidates) {
+        if (vieneu_file_exists(candidate)) {
+            return candidate;
         }
+    }
+    return candidates.empty() ? std::string() : candidates.front();
+}
+
+static std::string trim_ascii_copy(const std::string& value) {
+    size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+        start++;
+    }
+    size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        end--;
+    }
+    return value.substr(start, end - start);
+}
+
+static void append_phoneme_segment(std::stringstream& ss, const std::string& segment) {
+    const std::string trimmed = trim_ascii_copy(segment);
+    if (trimmed.empty()) {
+        return;
+    }
+    const std::streampos pos = ss.tellp();
+    if (pos > 0) {
+        ss << ' ';
+    }
+    ss << trimmed;
+}
+
+static std::string sea_g2p_take_string(char* value) {
+    if (!value) {
+        return {};
+    }
+    std::string out(value);
+    sea_g2p_free_string(value);
+    return out;
+}
+
+static SeaG2pContext* sea_g2p_context() {
+    static std::mutex mutex;
+    static SeaG2pContext* ctx = nullptr;
+    static bool attempted = false;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (attempted) {
+        return ctx;
+    }
+    attempted = true;
+
+    std::string dict_path = resolve_sea_g2p_dict_path();
+    if (dict_path.empty()) {
+        return nullptr;
+    }
+
+    ctx = sea_g2p_create("vi", dict_path.c_str());
+    if (!ctx && !vieneu_getenv_string("VIENEU_SEA_G2P_DEBUG").empty()) {
+        const std::string err = sea_g2p_take_string(sea_g2p_last_error());
+        std::cerr << "[VieNeu sea-g2p] failed to initialize with dict '" << dict_path << "'";
+        if (!err.empty()) {
+            std::cerr << ": " << err;
+        }
+        std::cerr << std::endl;
+    }
+    return ctx;
+}
+
+static bool try_sea_g2p_phonemizer(const std::string& text, std::string& out) {
+    SeaG2pContext* ctx = sea_g2p_context();
+    if (!ctx) {
         return false;
     }
-    {
-        std::ofstream fs(temp_path, std::ios::binary | std::ios::trunc);
-        if (!fs.is_open()) {
-            if (debug) {
-                std::cerr << "[VieNeu phonemizer] failed to open temp file: " << temp_path << "\n";
-            }
-            std::remove(temp_path.c_str());
-            return false;
-        }
-        fs.write(text.data(), static_cast<std::streamsize>(text.size()));
-    }
 
-    const std::string script =
-        "import sys;"
-        "sys.stdout.reconfigure(encoding='utf-8');"
-        "[sys.path.insert(0,p) for p in sys.argv[2:] if p];"
-        "from vieneu_utils.phonemize_text import phonemize_text_with_emotions as p;"
-        "sys.stdout.write(p(open(sys.argv[1],encoding='utf-8').read()))";
-
-    const std::vector<std::string> source_paths = vieneu_repo_source_candidates();
-    for (const std::string& python : vieneu_python_candidates()) {
-        if (python != "python" && python != "python3" && !file_exists_local(python)) {
-            if (debug) {
-                std::cerr << "[VieNeu phonemizer] missing python candidate: " << python << "\n";
-            }
+    std::stringstream ss;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        std::string emotion_token;
+        size_t consumed = 0;
+        if (consume_emotion_marker(text, pos, emotion_token, consumed)) {
+            append_emotion_token(ss, emotion_token);
+            pos += consumed;
             continue;
         }
-#ifdef _WIN32
-        std::string command = "call " + quote_shell_arg(python) + " -X utf8 -c " +
-            quote_shell_arg(script) + " " + quote_shell_arg(temp_path);
-#else
-        std::string command = quote_shell_arg(python) + " -X utf8 -c " +
-            quote_shell_arg(script) + " " + quote_shell_arg(temp_path);
-#endif
-        for (const std::string& source_path : source_paths) {
-            command += " " + quote_shell_arg(source_path);
-        }
-#ifdef _WIN32
-        command += debug ? " 2>&1" : " 2>NUL";
-        FILE* pipe = _popen(command.c_str(), "r");
-#else
-        command += debug ? " 2>&1" : " 2>/dev/null";
-        FILE* pipe = popen(command.c_str(), "r");
-#endif
-        if (!pipe) {
-            if (debug) {
-                std::cerr << "[VieNeu phonemizer] popen failed for: " << command << "\n";
-            }
-            continue;
-        }
-        std::string result;
-        char buffer[4096];
-        while (true) {
-            const size_t n = std::fread(buffer, 1, sizeof(buffer), pipe);
-            if (n > 0) {
-                result.append(buffer, n);
-            }
-            if (n < sizeof(buffer)) {
+
+        const size_t segment_start = pos;
+        while (pos < text.size()) {
+            if (consume_emotion_marker(text, pos, emotion_token, consumed)) {
                 break;
             }
+            pos++;
         }
-#ifdef _WIN32
-        const int rc = _pclose(pipe);
-#else
-        const int rc = pclose(pipe);
-#endif
-        if (debug) {
-            std::cerr << "[VieNeu phonemizer] candidate rc=" << rc
-                      << " python=" << python
-                      << " bytes=" << result.size() << "\n";
-            if (!result.empty()) {
-                std::cerr << "[VieNeu phonemizer] output=" << result << "\n";
+
+        const std::string segment = text.substr(segment_start, pos - segment_start);
+        if (trim_ascii_copy(segment).empty()) {
+            continue;
+        }
+        char* phonemes_raw = sea_g2p_run(ctx, segment.c_str(), 0);
+        if (!phonemes_raw) {
+            if (!vieneu_getenv_string("VIENEU_SEA_G2P_DEBUG").empty()) {
+                const std::string err = sea_g2p_take_string(sea_g2p_last_error());
+                std::cerr << "[VieNeu sea-g2p] phonemize failed";
+                if (!err.empty()) {
+                    std::cerr << ": " << err;
+                }
+                std::cerr << std::endl;
             }
+            return false;
         }
-        if (rc == 0) {
-            std::remove(temp_path.c_str());
-            out = std::move(result);
-            return true;
-        }
+        append_phoneme_segment(ss, sea_g2p_take_string(phonemes_raw));
     }
 
-    std::remove(temp_path.c_str());
-    return false;
+    out = ss.str();
+    return !out.empty();
 }
-
-static bool try_python_vieneu_phonemizer(const std::string& text, std::string& out) {
-    const std::string disabled = getenv_string("VIENEU_PYTHON_PHONEMIZER");
-    if (disabled == "0" || disabled == "false" || disabled == "FALSE" || disabled == "off" || disabled == "OFF") {
-        return false;
-    }
-
-    static std::mutex mutex;
-    static std::unordered_map<std::string, std::string> cache;
-    static bool known_unavailable = false;
-    std::lock_guard<std::mutex> lock(mutex);
-    auto it = cache.find(text);
-    if (it != cache.end()) {
-        out = it->second;
-        return true;
-    }
-    if (known_unavailable) {
-        return false;
-    }
-    if (run_python_vieneu_phonemizer(text, out)) {
-        cache.emplace(text, out);
-        return true;
-    }
-    known_unavailable = true;
-    return false;
-}
+#endif
 
 static std::string ascii_lower_copy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -514,10 +441,12 @@ std::vector<int64_t> VieneuProfile::extract_speech_ids(const std::string& genera
 }
 
 std::string VieneuProfile::phonemize(const std::string& text) {
-    std::string python_phonemes;
-    if (try_python_vieneu_phonemizer(text, python_phonemes)) {
-        return python_phonemes;
+#ifdef VIENEU_USE_SEA_G2P
+    std::string sea_g2p_phonemes;
+    if (try_sea_g2p_phonemizer(text, sea_g2p_phonemes)) {
+        return sea_g2p_phonemes;
     }
+#endif
 
     std::stringstream ss;
     std::string word = "";
