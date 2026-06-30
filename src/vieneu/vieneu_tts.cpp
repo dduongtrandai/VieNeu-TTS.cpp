@@ -26,6 +26,22 @@ static void set_last_error(const std::string& err) {
     g_last_error = err;
 }
 
+static VieneuProgressFn make_progress_bridge(vieneu_progress_callback callback, void * user_data) {
+    if (!callback) {
+        return VieneuProgressFn();
+    }
+    return [callback, user_data](const VieneuProgressEvent& event) {
+        vieneu_progress c_event;
+        c_event.abi_version = 1;
+        c_event.stage = event.stage ? event.stage : "";
+        c_event.current = event.current;
+        c_event.total = event.total;
+        c_event.progress = event.progress;
+        c_event.message = event.message.c_str();
+        callback(&c_event, user_data);
+    };
+}
+
 static std::string escape_regex(const std::string& text) {
     std::string escaped;
     escaped.reserve(text.size() * 2);
@@ -122,6 +138,8 @@ struct vieneu_context {
     std::unique_ptr<VieneuV3NativeEngine> vieneu_v3_native;
 
     std::string voices_json = "";
+    vieneu_progress_callback progress_callback = nullptr;
+    void * progress_user_data = nullptr;
 };
 
 static void normalize_output_level(std::vector<float>& audio) {
@@ -319,6 +337,13 @@ VIENEU_API void vieneu_free(struct vieneu_context * vieneu) {
     }
 }
 
+VIENEU_API void vieneu_set_progress_callback(struct vieneu_context * vieneu, vieneu_progress_callback callback, void * user_data) {
+    if (vieneu) {
+        vieneu->progress_callback = callback;
+        vieneu->progress_user_data = user_data;
+    }
+}
+
 VIENEU_API void vieneu_tts_default_params(struct vieneu_tts_params * p) {
     if (p) {
         p->abi_version = 1;
@@ -373,6 +398,7 @@ static int vieneu_synthesize_impl(struct vieneu_context * vieneu, const struct v
 
     std::vector<float> out_audio;
     bool success = false;
+    const VieneuProgressFn progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
 
     if (vieneu->profile == VieneuProfileType::VIENEU_V2_TURBO) {
         success = VieneuProfile::synthesize(
@@ -384,7 +410,8 @@ static int vieneu_synthesize_impl(struct vieneu_context * vieneu, const struct v
             params->top_k,
             params->max_tokens,
             params->skip_phonemize,
-            out_audio
+            out_audio,
+            progress
         );
     }
 
@@ -440,6 +467,7 @@ static int vieneu_synthesize_v2_impl(struct vieneu_context * vieneu, const struc
         v3_params.repetition_penalty = params->repetition_penalty;
         v3_params.max_chars = params->max_chars;
         v3_params.apply_watermark = params->apply_watermark;
+        v3_params.progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
 
         if (!vieneu->vieneu_v3->synthesize(v3_params, out_audio, error)) {
             set_last_error(error);
@@ -462,6 +490,7 @@ static int vieneu_synthesize_v2_impl(struct vieneu_context * vieneu, const struc
         v3_params.repetition_penalty = params->repetition_penalty;
         v3_params.max_chars = params->max_chars;
         v3_params.apply_watermark = params->apply_watermark;
+        v3_params.progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
 
         if (!vieneu->vieneu_v3_native->synthesize(v3_params, out_audio, error)) {
             set_last_error(error);

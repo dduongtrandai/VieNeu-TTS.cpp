@@ -11,6 +11,9 @@ param (
     [string]$OnnxRuntimeVersion = "1.24.4",
     [ValidateSet("cpu", "directml", "openvino")]
     [string]$OnnxRuntimeFlavor = "cpu",
+    [ValidateSet("cpu", "cuda", "vulkan", "all")]
+    [string]$NativeBackend = "cpu",
+    [string]$BuildDir = "build",
     [string]$OpenVINOOnnxRuntimeVersion = "1.24.1",
     [switch]$Clean,
     [switch]$NoPackage,
@@ -23,9 +26,34 @@ $ErrorActionPreference = "Stop"
 $PSScriptRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
 $ProjectRoot = Split-Path -Parent -Path $PSScriptRoot
 
+if ($NativeBackend -eq "all") {
+    Write-Host "Building all local native backends: cpu, cuda, vulkan" -ForegroundColor Cyan
+    foreach ($backend in @("cpu", "cuda", "vulkan")) {
+        $backendBuildDir = "build-$backend"
+        Write-Host "Starting $backend build in $backendBuildDir..." -ForegroundColor Cyan
+        & $PSCommandPath `
+            -OnnxRuntimeVersion $OnnxRuntimeVersion `
+            -OnnxRuntimeFlavor $OnnxRuntimeFlavor `
+            -NativeBackend $backend `
+            -BuildDir $backendBuildDir `
+            -OpenVINOOnnxRuntimeVersion $OpenVINOOnnxRuntimeVersion `
+            -LlamaCppRepo $LlamaCppRepo `
+            -Generator $Generator `
+            -Clean:$Clean `
+            -NoPackage:$NoPackage `
+            -PortableCpu:$PortableCpu
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    }
+    exit 0
+}
+
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Starting Local Build Setup for VieNeu TTS..." -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host "ONNX Runtime flavor: $OnnxRuntimeFlavor" -ForegroundColor Cyan
+Write-Host "Native ggml backend: $NativeBackend" -ForegroundColor Cyan
 
 # 1. Check and Clone llama.cpp if missing
 $LlamaDir = Join-Path $ProjectRoot "llama.cpp"
@@ -152,8 +180,19 @@ if ($Generator -eq "Ninja") {
     }
 }
 
+if ($NativeBackend -eq "cuda") {
+    if (-not $env:CUDA_PATH -or -not (Test-Path $env:CUDA_PATH)) {
+        Write-Error "NativeBackend=cuda requires NVIDIA CUDA Toolkit. Install CUDA 12.x or set CUDA_PATH to the toolkit root."
+    }
+    $NvccPath = Join-Path $env:CUDA_PATH "bin\nvcc.exe"
+    if (-not (Test-Path $NvccPath)) {
+        Write-Error "Could not find nvcc.exe at '$NvccPath'. Check your CUDA Toolkit installation."
+    }
+    Write-Host "Found CUDA Toolkit at $env:CUDA_PATH" -ForegroundColor Green
+}
+
 # 5. Clean build directory if requested
-$BuildPath = Join-Path $ProjectRoot "build"
+$BuildPath = Join-Path $ProjectRoot $BuildDir
 if ($Clean -and (Test-Path $BuildPath)) {
     Write-Host "Cleaning build directory..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force $BuildPath
@@ -167,6 +206,7 @@ $cmakeArgs = @(
     "-G", $Generator,
     "-DCMAKE_BUILD_TYPE=Release",
     "-DVIENEU_PORTABLE_CPU=$($PortableCpu.IsPresent)",
+    "-DVIENEU_NATIVE_BACKEND=$NativeBackend",
     "-DVIENEU_LLAMA_DIR=$LlamaDir",
     "-DONNXRUNTIME_ROOT=$OrtRoot"
 )
@@ -207,12 +247,24 @@ $OrtRuntimePatterns = @(
     "onnxruntime_providers*.dll",
     "DirectML.dll",
     "openvino*.dll",
-    "tbb*.dll"
+    "tbb*.dll",
+    "cudart64_*.dll",
+    "cublas64_*.dll",
+    "cublasLt64_*.dll"
 )
 
 foreach ($root in $OrtRuntimeRoots) {
     foreach ($pattern in $OrtRuntimePatterns) {
         Get-ChildItem -LiteralPath $root -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $BuildPath -Force
+        }
+    }
+}
+
+if ($NativeBackend -eq "cuda") {
+    $CudaBin = Join-Path $env:CUDA_PATH "bin"
+    foreach ($pattern in @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll")) {
+        Get-ChildItem -LiteralPath $CudaBin -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $BuildPath -Force
         }
     }
@@ -224,7 +276,12 @@ if (-not $NoPackage) {
     $PackageScript = Join-Path $PSScriptRoot "package-runtime.ps1"
     if (Test-Path $PackageScript) {
         $OutputDir = Join-Path $ProjectRoot "dist"
-        & $PackageScript -BuildDir $BuildPath -OutputDir $OutputDir -OnnxRuntimeRoot $OrtRoot -RuntimeFlavor $OnnxRuntimeFlavor -OnnxRuntimeVersion $SelectedOnnxRuntimeVersion -RuntimeVersion "local"
+        $PackageFlavor = switch ($NativeBackend) {
+            "cuda" { "cuda-12" }
+            "vulkan" { "vulkan" }
+            default { $OnnxRuntimeFlavor }
+        }
+        & $PackageScript -BuildDir $BuildPath -OutputDir $OutputDir -OnnxRuntimeRoot $OrtRoot -RuntimeFlavor $OnnxRuntimeFlavor -NativeBackend $NativeBackend -PackageFlavor $PackageFlavor -PackagePlatform "win" -OnnxRuntimeVersion $SelectedOnnxRuntimeVersion -RuntimeVersion "local"
     } else {
         Write-Warning "Could not find package script at $PackageScript"
     }

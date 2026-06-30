@@ -772,21 +772,27 @@ bool VieneuProfile::synthesize(
     int top_k,
     int max_tokens,
     bool skip_phonemize,
-    std::vector<float>& out_audio)
+    std::vector<float>& out_audio,
+    const VieneuProgressFn& progress)
 {
     out_audio.clear();
+    vieneu_report_progress(progress, "prepare", 0, 0, 0.0f, "Preparing v2 synthesis.");
 
     std::string phonemes = text;
     if (!skip_phonemize) {
+        vieneu_report_progress(progress, "phonemize", 0, 1, 0.02f, "Phonemizing input text.");
         phonemes = phonemize(text);
+        vieneu_report_progress(progress, "phonemize", 1, 1, 0.05f, "Phonemization complete.");
     }
 
     std::string prompt = format_prompt(phonemes);
     auto prompt_tokens = llama.tokenize(prompt, true);
 
+    vieneu_report_progress(progress, "prefill", 0, 1, 0.06f, "Running prompt prefill.");
     if (!llama.decode(prompt_tokens, 0, true)) {
         return false;
     }
+    vieneu_report_progress(progress, "prefill", 1, 1, 0.10f, "Prompt prefill complete.");
 
     std::string generated_text = "";
     llama_token curr_token = 0;
@@ -811,6 +817,8 @@ bool VieneuProfile::synthesize(
         }
 
         n_tokens++;
+        const float token_progress = max_tokens > 0 ? static_cast<float>(n_tokens) / static_cast<float>(max_tokens) : 0.0f;
+        vieneu_report_progress(progress, "generate_tokens", n_tokens, max_tokens, 0.10f + token_progress * 0.75f, "Generating speech tokens.");
     }
 
     auto speech_ids = extract_speech_ids(generated_text);
@@ -823,10 +831,12 @@ bool VieneuProfile::synthesize(
     std::vector<int64_t> speech_ids_int64(speech_ids.begin(), speech_ids.end());
 
     std::vector<float> chunk_audio;
+    vieneu_report_progress(progress, "decode_audio", 0, 1, 0.90f, "Decoding speech tokens to audio.");
     if (!decoder.decode_vieneu(speech_ids_int64, voice_embedding, chunk_audio)) {
         return false;
     }
 
     out_audio = std::move(chunk_audio);
+    vieneu_report_progress(progress, "complete", 1, 1, 1.0f, "Synthesis complete.");
     return true;
 }

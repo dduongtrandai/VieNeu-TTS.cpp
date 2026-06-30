@@ -11,6 +11,7 @@
 
 #include "onnxruntime_cxx_api.h"
 #include "v3_common/v3_repetition_history.h"
+#include "vieneu_progress.h"
 
 struct VieneuV3OnnxInit {
     std::string model_dir;
@@ -33,6 +34,9 @@ struct VieneuV3OnnxParams {
     float repetition_penalty = 1.2f;
     int max_chars = 384;
     bool apply_watermark = true;
+    VieneuProgressFn progress;
+    float progress_base = 0.0f;
+    float progress_span = 1.0f;
 };
 
 class VieneuV3OnnxEngine {

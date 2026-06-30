@@ -146,6 +146,7 @@ bool VieneuV3NativeEngine::initialize(const VieneuV3NativeInit& init, std::strin
 }
 
 bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::vector<float>& out_audio, std::string& error) {
+    vieneu_report_progress(params.progress, "prepare", 0, 0, 0.0f, "Preparing v3 native synthesis.");
     if (!initialized_) {
         error = "Engine not initialized.";
         return false;
@@ -189,6 +190,13 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
     const int silence_samples = static_cast<int>(std::lround(static_cast<double>(sample_rate()) * 0.15));
     const bool debug_tags = env_flag_enabled_local("VIENEU_V3_NATIVE_DEBUG_TAGS");
     for (size_t i = 0; i < chunks.size(); ++i) {
+        vieneu_report_progress(
+            params.progress,
+            "chunk",
+            static_cast<int>(i),
+            static_cast<int>(chunks.size()),
+            static_cast<float>(i) / static_cast<float>(chunks.size()),
+            "Starting v3 native text chunk.");
         const std::string phonemes = phonemize_for_v3(chunks[i]);
         if (debug_tags || contains_v3_emotion_token(phonemes)) {
             const std::vector<int64_t> phone_ids = tokenizer_.encode(phonemes);
@@ -202,11 +210,14 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
             std::cerr << "\n";
         }
         std::vector<float> chunk_audio;
+        VieneuV3NativeParams chunk_params = params;
+        chunk_params.progress_base = static_cast<float>(i) / static_cast<float>(chunks.size());
+        chunk_params.progress_span = 1.0f / static_cast<float>(chunks.size());
         if (!synthesize_phonemes(
                 phonemes,
                 ref_codes.empty() ? nullptr : &ref_codes,
                 leading_token,
-                params,
+                chunk_params,
                 chunk_audio,
                 error)) {
             if (chunks.size() > 1) {
@@ -221,8 +232,16 @@ bool VieneuV3NativeEngine::synthesize(const VieneuV3NativeParams& params, std::v
             out_audio.insert(out_audio.end(), static_cast<size_t>(silence_samples), 0.0f);
         }
         out_audio.insert(out_audio.end(), chunk_audio.begin(), chunk_audio.end());
+        vieneu_report_progress(
+            params.progress,
+            "chunk",
+            static_cast<int>(i + 1),
+            static_cast<int>(chunks.size()),
+            static_cast<float>(i + 1) / static_cast<float>(chunks.size()),
+            "Finished v3 native text chunk.");
     }
 
+    vieneu_report_progress(params.progress, "complete", 1, 1, 1.0f, "V3 native synthesis complete.");
     return true;
 }
 
@@ -243,6 +262,10 @@ bool VieneuV3NativeEngine::synthesize_phonemes(
     try {
         const bool benchmark_enabled = env_flag_enabled_local("VIENEU_V3_NATIVE_BENCHMARK");
         std::vector<float> synth_h;
+        auto scaled_progress = [&params](float local) {
+            return params.progress_base + local * params.progress_span;
+        };
+        vieneu_report_progress(params.progress, "prefill", 0, 1, scaled_progress(0.10f), "Running v3 native prompt prefill.");
         auto t_prefill_start = benchmark_enabled ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
         if (!backbone_.prefill(prompt_embeds_, synth_h)) {
             error = "Semantic backbone prefill failed.";
@@ -253,6 +276,7 @@ bool VieneuV3NativeEngine::synthesize_phonemes(
             auto t_prefill_end = std::chrono::high_resolution_clock::now();
             prefill_ms = std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
         }
+        vieneu_report_progress(params.progress, "prefill", 1, 1, scaled_progress(0.18f), "V3 native prompt prefill complete.");
 
         std::vector<V3RepetitionHistory> history;
         if (std::fabs(params.repetition_penalty - 1.0f) > 1e-6f) {
@@ -295,6 +319,13 @@ bool VieneuV3NativeEngine::synthesize_phonemes(
             for (int64_t code : codes) {
                 frames.push_back(static_cast<int32_t>(code));
             }
+            vieneu_report_progress(
+                params.progress,
+                "generate_frames",
+                t + 1,
+                max_frames,
+                scaled_progress(0.18f + (static_cast<float>(t + 1) / static_cast<float>(max_frames)) * 0.68f),
+                "Generating v3 native acoustic frames.");
             if (eos) {
                 saw_eos = true;
                 break;
@@ -330,8 +361,12 @@ bool VieneuV3NativeEngine::synthesize_phonemes(
         }
 
         // MOSS decode
+        vieneu_report_progress(params.progress, "decode_audio", 0, 1, scaled_progress(0.90f), "Decoding v3 native frames to audio.");
         auto t_codec_start = benchmark_enabled ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
         bool ok = codec_.decode(frames, static_cast<int64_t>(frames.size() / config_.n_vq), out_audio, error);
+        if (ok) {
+            vieneu_report_progress(params.progress, "decode_audio", 1, 1, scaled_progress(0.96f), "V3 native audio decode complete.");
+        }
         if (benchmark_enabled) {
             auto t_codec_end = std::chrono::high_resolution_clock::now();
             double codec_ms = std::chrono::duration<double, std::milli>(t_codec_end - t_codec_start).count();
