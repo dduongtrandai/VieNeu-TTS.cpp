@@ -23,6 +23,10 @@ option(VIENEU_PORTABLE_CPU "Build portable CPU kernels instead of host-native SI
 set(VIENEU_NATIVE_BACKEND "cpu" CACHE STRING "Native ggml backend to build: cpu, cuda, vulkan, or metal")
 set_property(CACHE VIENEU_NATIVE_BACKEND PROPERTY STRINGS "cpu" "cuda" "vulkan" "metal")
 
+if(UNIX)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # Fallback environment check for ONNX Runtime
 if(NOT ONNXRUNTIME_ROOT AND DEFINED ENV{ONNXRUNTIME_ROOT})
     set(ONNXRUNTIME_ROOT $ENV{ONNXRUNTIME_ROOT})
@@ -139,6 +143,9 @@ add_library(vieneu-tts-core STATIC
     src/vieneu/vieneu.cpp
     ${VIENEU_V3_ONNX_SOURCES}
     ${VIENEU_V3_NATIVE_SOURCES}
+)
+set_target_properties(vieneu-tts-core PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
 )
 
 target_include_directories(vieneu-tts-core PUBLIC

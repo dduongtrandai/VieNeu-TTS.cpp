@@ -36,17 +36,17 @@ jobs:
             backend: vulkan
             package_flavor: vulkan
             archive: vieneu-tts-linux-vulkan.tar.gz
-          - runner: windows-latest
+          - runner: windows-2022
             platform: win
             backend: cpu
             package_flavor: cpu
             archive: vieneu-tts-win-cpu.zip
-          - runner: windows-latest
+          - runner: windows-2022
             platform: win
             backend: cuda
             package_flavor: cuda-12
             archive: vieneu-tts-win-cuda-12.zip
-          - runner: windows-latest
+          - runner: windows-2022
             platform: win
             backend: vulkan
             package_flavor: vulkan
@@ -132,7 +132,7 @@ jobs:
             $name = "onnxruntime-win-x64-$version"
             $archive = "$name.zip"
           } elseif ("${{ matrix.platform }}" -eq "macos") {
-            $name = "onnxruntime-osx-universal2-$version"
+            $name = "onnxruntime-osx-arm64-$version"
             $archive = "$name.tgz"
           } else {
             $name = "onnxruntime-linux-x64-$version"
@@ -168,7 +168,7 @@ jobs:
           )
 
           if ("${{ matrix.platform }}" -eq "macos") {
-            $cmakeArgs += "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+            $cmakeArgs += "-DCMAKE_OSX_ARCHITECTURES=arm64"
           }
 
           cmake @cmakeArgs
@@ -227,6 +227,6 @@ jobs:
             | `vieneu-tts-win-cpu.zip` | Windows x64 | CPU | - |
             | `vieneu-tts-win-cuda-12.zip` | Windows x64 | CUDA 12 | NVIDIA |
             | `vieneu-tts-win-vulkan.zip` | Windows x64 | Vulkan | AMD / Intel / NVIDIA |
-            | `vieneu-tts-macos-metal.tar.gz` | macOS Universal | Metal | Apple Silicon / Intel |
+            | `vieneu-tts-macos-metal.tar.gz` | macOS ARM64 | Metal | Apple Silicon |
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
