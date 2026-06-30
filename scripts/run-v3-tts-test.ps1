@@ -41,9 +41,7 @@ $VoicesJson = Join-Path $ModelDir "voices_v3_turbo.json"
 # Find existing built CLI if available in common build directories
 $CliCandidates = @(
     (Join-Path $RepoRoot "build\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build-check\Release\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build-check\vieneu-tts-cli.exe")
+    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe")
 )
 
 $CliExe = $null
@@ -64,7 +62,7 @@ if ($CliExe) {
     }
 } else {
     # Default fallback if not built yet
-    $BuildDir = Join-Path $RepoRoot "build-check"
+    $BuildDir = Join-Path $RepoRoot "build"
     $ExeDir = Join-Path $BuildDir "Release"
     $CliExe = Join-Path $ExeDir "vieneu-tts-cli.exe"
 }

@@ -30,12 +30,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$BuildDir = Join-Path $RepoRoot "build-check"
+$BuildDir = Join-Path $RepoRoot "build"
 $CliCandidates = @(
     (Join-Path $RepoRoot "build\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build-check\vieneu-tts-cli.exe"),
-    (Join-Path $RepoRoot "build-check\Release\vieneu-tts-cli.exe")
+    (Join-Path $RepoRoot "build\Release\vieneu-tts-cli.exe")
 )
 
 function Write-Step([string]$Message) {
@@ -285,9 +283,9 @@ try {
             $env:VIENEU_ACOUSTIC_DIRECT_LINEAR = "1"
             $env:VIENEU_ACOUSTIC_GGML_LINEAR = "0"
         }
-        $env:VIENEU_ACOUSTIC_GGML_HEADS = if ($GgmlHeads) { "1" } else { "0" }
-        $env:VIENEU_GGML_FUSE_FFN = if ($FuseFfn) { "1" } else { "0" }
-        $env:VIENEU_ACOUSTIC_Q8_FFN = if ($Q8Ffn) { "1" } else { "0" }
+        $env:VIENEU_ACOUSTIC_GGML_HEADS = if ($DisableGgmlHeads) { "0" } else { "1" }
+        $env:VIENEU_GGML_FUSE_FFN = if ($NoFuseFfn) { "0" } else { "1" }
+        $env:VIENEU_ACOUSTIC_Q8_FFN = if ($DisableQ8Ffn) { "0" } else { "1" }
 
         Write-Step "Running vieneu-v3-native benchmark"
         $displayArgs = $argsList -join " "
