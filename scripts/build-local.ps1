@@ -92,6 +92,17 @@ function Expand-NuGetPackage([string]$PackageId, [string]$Version, [string]$Dest
     Remove-Item $PackagePath -Force
 }
 
+function Copy-RequiredRuntimePattern([string[]]$Roots, [string]$Pattern, [string]$DestinationDir, [string]$DisplayName) {
+    foreach ($root in ($Roots | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)) {
+        $hit = Get-ChildItem -LiteralPath $root -Filter $Pattern -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) {
+            Copy-Item -LiteralPath $hit.FullName -Destination $DestinationDir -Force
+            return
+        }
+    }
+    Write-Error "$DisplayName ($Pattern) is required but was not found."
+}
+
 if ($OnnxRuntimeFlavor -eq "cpu") {
     $OrtRootName = "onnxruntime-win-x64-$OnnxRuntimeVersion"
     $OrtRoot = Join-Path $OrtSdkDir $OrtRootName
@@ -267,10 +278,8 @@ foreach ($root in $OrtRuntimeRoots) {
 
 if ($NativeBackend -eq "cuda") {
     $CudaBin = Join-Path $env:CUDA_PATH "bin"
-    foreach ($pattern in @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll")) {
-        Get-ChildItem -LiteralPath $CudaBin -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $BuildPath -Force
-        }
+    foreach ($pattern in @("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")) {
+        Copy-RequiredRuntimePattern -Roots @($CudaBin) -Pattern $pattern -DestinationDir $BuildPath -DisplayName "CUDA runtime library"
     }
 }
 

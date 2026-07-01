@@ -127,6 +127,19 @@ function Copy-RuntimePatterns {
     }
 }
 
+function Copy-RequiredRuntimePatterns {
+    param(
+        [string[]]$Roots,
+        [string[]]$Patterns,
+        [string]$DestinationDir,
+        [string]$DisplayName
+    )
+
+    foreach ($pattern in $Patterns) {
+        $null = Copy-FirstRuntimeFile -Roots $Roots -Patterns @($pattern) -DestinationDir $DestinationDir -DisplayName "$DisplayName ($pattern)"
+    }
+}
+
 if (-not $PackagePlatform) {
     $PackagePlatform = Get-HostPlatform
 }
@@ -235,6 +248,22 @@ $dependencyPatterns = @(
     "libsea_g2p_rs.dylib"
 )
 Copy-RuntimePatterns -Roots $runtimeRoots -Patterns $dependencyPatterns -DestinationDir $StagingDir
+
+if ($NativeBackend -eq "cuda") {
+    if ($isWindowsPackage) {
+        Copy-RequiredRuntimePatterns -Roots $runtimeRoots -Patterns @(
+            "cudart64_12.dll",
+            "cublas64_12.dll",
+            "cublasLt64_12.dll"
+        ) -DestinationDir $StagingDir -DisplayName "CUDA runtime library"
+    } elseif ($PackagePlatform.StartsWith("linux")) {
+        Copy-RequiredRuntimePatterns -Roots $runtimeRoots -Patterns @(
+            "libcudart.so*",
+            "libcublas.so*",
+            "libcublasLt.so*"
+        ) -DestinationDir $StagingDir -DisplayName "CUDA runtime library"
+    }
+}
 
 $SeaG2pDictCandidates = @(
     (Join-Path $ProjectRoot "third_party/sea-g2p/python/sea_g2p/sea_g2p.bin")

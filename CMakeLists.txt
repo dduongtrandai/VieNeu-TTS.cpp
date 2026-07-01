@@ -58,6 +58,7 @@ set(GGML_VULKAN OFF CACHE BOOL "Build ggml Vulkan backend" FORCE)
 set(GGML_METAL OFF CACHE BOOL "Build ggml Metal backend" FORCE)
 if(VIENEU_NATIVE_BACKEND_NORMALIZED STREQUAL "cuda")
     set(GGML_CUDA ON CACHE BOOL "Build ggml CUDA backend" FORCE)
+    find_package(CUDAToolkit REQUIRED)
     if(WIN32)
         set(GGML_CUDA_NCCL OFF CACHE BOOL "Disable NCCL for local Windows CUDA builds" FORCE)
     endif()
@@ -253,6 +254,21 @@ if(VIENEU_SEA_G2P)
         COMMENT "Copying sea-g2p runtime library next to vieneu-tts"
         VERBATIM
     )
+endif()
+if(WIN32 AND VIENEU_NATIVE_BACKEND_NORMALIZED STREQUAL "cuda")
+    foreach(VIENEU_CUDA_RUNTIME_DLL cudart64_12.dll cublas64_12.dll cublasLt64_12.dll)
+        if(EXISTS "${CUDAToolkit_BIN_DIR}/${VIENEU_CUDA_RUNTIME_DLL}")
+            add_custom_command(TARGET vieneu-tts POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CUDAToolkit_BIN_DIR}/${VIENEU_CUDA_RUNTIME_DLL}"
+                    "$<TARGET_FILE_DIR:vieneu-tts>"
+                COMMENT "Copying CUDA runtime dependency ${VIENEU_CUDA_RUNTIME_DLL} next to vieneu-tts"
+                VERBATIM
+            )
+        else()
+            message(FATAL_ERROR "CUDA runtime dependency not found: ${CUDAToolkit_BIN_DIR}/${VIENEU_CUDA_RUNTIME_DLL}")
+        endif()
+    endforeach()
 endif()
 
 # Export options for shared library on Windows
