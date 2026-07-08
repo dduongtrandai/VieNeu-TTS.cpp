@@ -1,12 +1,13 @@
 param(
     [string]$Text = "",
     [string]$TextFile = "scripts\v3-native-benchmark-text.txt",
-    [ValidateSet("all", "example", "example_2", "example_3", "example_4")]
-    [string]$Ref = "all",
+    [ValidateSet("example", "example_2", "example_3", "example_4")]
+    [string]$Ref = "example",
+    [switch]$All,
     [string]$OutputDir = "outputs\voice-clone",
     [string]$Style = "tu_nhien",
     [string]$LogDir = "outputs\voice-clone\logs",
-    [int]$MaxNewFrames = 180,
+    [int]$MaxNewFrames = 300,
     [float]$Temperature = 0.8,
     [int]$TopK = 25,
     [float]$TopP = 0.95,
@@ -89,13 +90,13 @@ function Find-OnnxRuntimeRoot {
 }
 
 function Find-Cli {
-    if (!$NoBuild) {
-        return (Join-Path $BuildDir "Release\vieneu-tts-cli.exe")
-    }
     foreach ($path in $CliCandidates) {
         if (Test-Path $path) {
             return $path
         }
+    }
+    if (!$NoBuild) {
+        return (Join-Path $BuildDir "Release\vieneu-tts-cli.exe")
     }
     return (Join-Path $BuildDir "Release\vieneu-tts-cli.exe")
 }
@@ -109,6 +110,16 @@ function Ensure-Built([string]$CliExe) {
     }
 
     $cmake = Find-CMake
+    $cachePath = Join-Path $BuildDir "CMakeCache.txt"
+    if (Test-Path $cachePath) {
+        Write-Step "Building vieneu-tts-cli from existing CMake cache"
+        & $cmake --build $BuildDir --config Release --target vieneu-tts-cli
+        if ($LASTEXITCODE -ne 0) {
+            throw "Build failed."
+        }
+        return
+    }
+
     $resolvedLlamaDir = Resolve-RepoPath $LlamaDir
     $resolvedOrtRoot = Find-OnnxRuntimeRoot
     if (!(Test-Path (Join-Path $resolvedLlamaDir "CMakeLists.txt"))) {
@@ -222,10 +233,11 @@ if (!(Test-Path $ManifestPath)) {
 }
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Encoding UTF8 -Raw | ConvertFrom-Json
-$refs = @($manifest.refs)
-if ($Ref -ne "all") {
-    $refs = @($refs | Where-Object { $_.id -eq $Ref })
-}
+$refs = @(if ($All) {
+    $manifest.refs
+} else {
+    $manifest.refs | Where-Object { $_.id -eq $Ref }
+})
 if ($refs.Count -eq 0) {
     throw "No voice reference matched: $Ref"
 }
@@ -357,6 +369,13 @@ try {
             Add-Content -LiteralPath $logPath -Value ("[VoiceCloneScript] Reference transcript: {0}" -f $item.text)
             Add-Content -LiteralPath $logPath -Value ("[VoiceCloneScript] Text source: {0}" -f $TextSource)
             Add-Content -LiteralPath $logPath -Value ("[VoiceCloneScript] Total process time: {0:F3}s" -f $stopwatch.Elapsed.TotalSeconds)
+
+            $hitFrameLimit = @($runOutput | Select-String -SimpleMatch "reached max_new_frames").Count -gt 0
+            if ($hitFrameLimit) {
+                $frameWarning = "[VoiceCloneScript] Warning: generation hit max_new_frames=$MaxNewFrames. This can truncate speech or skip trailing text; rerun with a larger -MaxNewFrames or smaller -MaxChars."
+                Write-Host $frameWarning -ForegroundColor Yellow
+                Add-Content -LiteralPath $logPath -Value $frameWarning
+            }
 
             if ($exitCode -ne 0) {
                 throw "TTS command failed for $($item.id) with exit code $exitCode."
