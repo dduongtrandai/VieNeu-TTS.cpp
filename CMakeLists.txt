@@ -198,6 +198,7 @@ set(VIENEU_V3_NATIVE_SOURCES
     src/vieneu/v3_native/v3_native_backbone_llama.cpp
     src/vieneu/v3_native/v3_native_acoustic_ggml.cpp
     src/vieneu/v3_native/v3_native_moss_codec.cpp
+    src/vieneu/v3_native/v3_native_reference.cpp
     src/vieneu/v3_native/v3_native_stream.cpp
     src/vieneu/v3_native/v3_native_batch.cpp
     src/vieneu/v3_native/vieneu_v3_native.cpp

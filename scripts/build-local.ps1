@@ -18,11 +18,17 @@ param (
     [switch]$Clean,
     [switch]$NoPackage,
     [switch]$PortableCpu,
+    [switch]$HostNativeCpu,
+    [switch]$NoSeaG2p,
+    [switch]$NoRustInstall,
     [string]$LlamaCppRepo = "https://github.com/ggml-org/llama.cpp.git",
+    [string]$SeaG2pRepo = "https://github.com/dduongtrandai/sea-g2p.git",
     [string]$Generator = "Ninja"
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $PSScriptRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
 $ProjectRoot = Split-Path -Parent -Path $PSScriptRoot
 
@@ -41,7 +47,11 @@ if ($NativeBackend -eq "all") {
             -Generator $Generator `
             -Clean:$Clean `
             -NoPackage:$NoPackage `
-            -PortableCpu:$PortableCpu
+            -PortableCpu:$PortableCpu `
+            -HostNativeCpu:$HostNativeCpu `
+            -NoSeaG2p:$NoSeaG2p `
+            -NoRustInstall:$NoRustInstall `
+            -SeaG2pRepo $SeaG2pRepo
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }
@@ -55,7 +65,80 @@ Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "ONNX Runtime flavor: $OnnxRuntimeFlavor" -ForegroundColor Cyan
 Write-Host "Native ggml backend: $NativeBackend" -ForegroundColor Cyan
 
-# 1. Check and initialize llama.cpp submodule if missing
+$EnablePortableCpu = -not $HostNativeCpu.IsPresent
+$EnableSeaG2p = -not $NoSeaG2p.IsPresent
+if ($PortableCpu.IsPresent) {
+    $EnablePortableCpu = $true
+}
+Write-Host "Portable CPU kernels: $EnablePortableCpu" -ForegroundColor Cyan
+Write-Host "sea-g2p phonemizer: $EnableSeaG2p" -ForegroundColor Cyan
+
+function Add-PathDirectoryIfExists([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+        return
+    }
+    $pathItems = @($env:PATH -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($pathItems -notcontains $Path) {
+        $env:PATH = "$Path;$env:PATH"
+    }
+}
+
+function Ensure-CargoToolchain {
+    if (-not $EnableSeaG2p) {
+        return
+    }
+
+    $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($cargoCommand) {
+        Write-Host "Found Rust cargo: $($cargoCommand.Source)" -ForegroundColor Green
+        return
+    }
+
+    $cargoBinCandidates = @()
+    if ($env:CARGO_HOME) {
+        $cargoBinCandidates += (Join-Path $env:CARGO_HOME "bin")
+    }
+    if ($env:USERPROFILE) {
+        $cargoBinCandidates += (Join-Path $env:USERPROFILE ".cargo\bin")
+    }
+    foreach ($cargoBin in ($cargoBinCandidates | Select-Object -Unique)) {
+        $cargoExe = Join-Path $cargoBin "cargo.exe"
+        if (Test-Path $cargoExe) {
+            Add-PathDirectoryIfExists $cargoBin
+            Write-Host "Found Rust cargo: $cargoExe" -ForegroundColor Green
+            return
+        }
+    }
+
+    if ($NoRustInstall) {
+        Write-Error "Rust cargo is required for sea-g2p but was not found. Install Rust from https://rustup.rs/ or rerun without -NoRustInstall."
+    }
+
+    Write-Host "Rust cargo was not found. Installing Rust stable toolchain with rustup..." -ForegroundColor Yellow
+    $rustupDir = Join-Path $ProjectRoot ".deps\rustup"
+    New-Item -ItemType Directory -Force -Path $rustupDir | Out-Null
+    $rustupInit = Join-Path $rustupDir "rustup-init.exe"
+    if (-not (Test-Path $rustupInit)) {
+        $rustupUrl = "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
+        Write-Host "Downloading Rust installer from $rustupUrl" -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupInit
+    }
+
+    & $rustupInit -y --default-toolchain stable --profile minimal --no-modify-path
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Rust toolchain installation failed."
+    }
+
+    $defaultCargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+    Add-PathDirectoryIfExists $defaultCargoBin
+    $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargoCommand) {
+        Write-Error "Rust toolchain installation completed, but cargo.exe is still not available in this PowerShell session."
+    }
+    Write-Host "Rust cargo is ready: $($cargoCommand.Source)" -ForegroundColor Green
+}
+
+# 1. Check and initialize source dependencies if missing
 $LlamaDir = Join-Path $ProjectRoot "third_party\llama.cpp"
 if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
     Write-Host "llama.cpp submodule not found. Initializing submodules..." -ForegroundColor Yellow
@@ -67,6 +150,31 @@ if (-not (Test-Path (Join-Path $LlamaDir "CMakeLists.txt"))) {
 } else {
     Write-Host "Found llama.cpp source directory." -ForegroundColor Green
 }
+
+$SeaG2pDir = Join-Path $ProjectRoot "third_party\sea-g2p"
+if ($EnableSeaG2p) {
+    $seaG2pCargo = Join-Path $SeaG2pDir "Cargo.toml"
+    $seaG2pHeader = Join-Path $SeaG2pDir "include\sea_g2p.h"
+    $seaG2pDict = Join-Path $SeaG2pDir "python\sea_g2p\sea_g2p.bin"
+    if (-not ((Test-Path $seaG2pCargo) -and (Test-Path $seaG2pHeader) -and (Test-Path $seaG2pDict))) {
+        Write-Host "sea-g2p submodule is missing or incomplete. Initializing submodule..." -ForegroundColor Yellow
+        git submodule update --init --recursive third_party/sea-g2p
+    }
+    if (-not ((Test-Path $seaG2pCargo) -and (Test-Path $seaG2pHeader) -and (Test-Path $seaG2pDict))) {
+        Write-Host "Submodule init did not produce sea-g2p. Cloning fallback from $SeaG2pRepo..." -ForegroundColor Yellow
+        if (-not (Test-Path $SeaG2pDir)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SeaG2pDir) | Out-Null
+        }
+        git clone --depth 1 $SeaG2pRepo $SeaG2pDir
+    }
+    if (-not ((Test-Path $seaG2pCargo) -and (Test-Path $seaG2pHeader) -and (Test-Path $seaG2pDict))) {
+        Write-Error "sea-g2p is required for release-parity builds but is incomplete at $SeaG2pDir. Use -NoSeaG2p only for debugging rule-based phonemizer fallback."
+    }
+} else {
+    Write-Host "Skipping sea-g2p setup because -NoSeaG2p was provided." -ForegroundColor Yellow
+}
+
+Ensure-CargoToolchain
 
 # 2. Check and Download ONNX Runtime SDK if missing
 $OrtSdkDir = Join-Path $ProjectRoot "ort_sdk"
@@ -148,7 +256,7 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
     }
     
     if (Test-Path $vsWherePath) {
-        $vsPath = & $vsWherePath -latest -property installationPath
+        $vsPath = & $vsWherePath -latest -products * -property installationPath
         if ($vsPath) {
             Write-Host "Found Visual Studio at: $vsPath" -ForegroundColor Green
             $devShellPath = Join-Path $vsPath "Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
@@ -214,15 +322,18 @@ if ($Clean -and (Test-Path $BuildPath)) {
 }
 
 # 6. Configure CMake
+Ensure-CargoToolchain
 Write-Host "Configuring CMake..." -ForegroundColor Cyan
 $cmakeArgs = @(
     "-B", $BuildPath,
     "-S", $ProjectRoot,
     "-G", $Generator,
     "-DCMAKE_BUILD_TYPE=Release",
-    "-DVIENEU_PORTABLE_CPU=$($PortableCpu.IsPresent)",
+    "-DVIENEU_PORTABLE_CPU=$EnablePortableCpu",
     "-DVIENEU_NATIVE_BACKEND=$NativeBackend",
+    "-DVIENEU_SEA_G2P=$EnableSeaG2p",
     "-DVIENEU_LLAMA_DIR=$LlamaDir",
+    "-DVIENEU_SEA_G2P_DIR=$SeaG2pDir",
     "-DONNXRUNTIME_ROOT=$OrtRoot"
 )
 
@@ -246,6 +357,12 @@ Write-Host "Building project..." -ForegroundColor Cyan
 & cmake --build $BuildPath --config Release --parallel
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Build failed."
+}
+if ($EnableSeaG2p) {
+    $SeaG2pRuntimeDll = Join-Path $BuildPath "sea_g2p_rs.dll"
+    if (-not (Test-Path $SeaG2pRuntimeDll)) {
+        Write-Error "Build completed but sea_g2p_rs.dll was not found at $SeaG2pRuntimeDll. The local runtime is not release-parity."
+    }
 }
 
 # 8. Copy ONNX Runtime DLLs next to the locally built executables.
@@ -295,6 +412,27 @@ if (-not $NoPackage) {
             default { $OnnxRuntimeFlavor }
         }
         & $PackageScript -BuildDir $BuildPath -OutputDir $OutputDir -OnnxRuntimeRoot $OrtRoot -RuntimeFlavor $OnnxRuntimeFlavor -NativeBackend $NativeBackend -PackageFlavor $PackageFlavor -PackagePlatform "win" -OnnxRuntimeVersion $SelectedOnnxRuntimeVersion -RuntimeVersion "local"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Runtime packaging failed."
+        }
+        if ($EnableSeaG2p) {
+            $ArchivePath = Join-Path $OutputDir "vieneu-tts-win-$PackageFlavor.zip"
+            if (-not (Test-Path $ArchivePath)) {
+                Write-Error "Expected package archive was not created: $ArchivePath"
+            }
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+            try {
+                $entryNames = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+                foreach ($requiredEntry in @("sea_g2p_rs.dll", "sea_g2p.bin")) {
+                    if ($entryNames -notcontains $requiredEntry) {
+                        Write-Error "Package $ArchivePath is missing $requiredEntry. The local runtime is not release-parity."
+                    }
+                }
+            } finally {
+                $zip.Dispose()
+            }
+        }
     } else {
         Write-Warning "Could not find package script at $PackageScript"
     }

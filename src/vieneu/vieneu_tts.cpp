@@ -376,6 +376,25 @@ VIENEU_API void vieneu_tts_v2_default_params(struct vieneu_tts_params_v2 * p) {
     }
 }
 
+VIENEU_API void vieneu_tts_v3_default_params(struct vieneu_tts_params_v3 * p) {
+    if (p) {
+        p->abi_version = 3;
+        p->text = nullptr;
+        p->voice_id = nullptr;
+        p->ref_audio_path = nullptr;
+        p->style = "tu_nhien";
+        p->temperature = 0.8f;
+        p->top_k = 25;
+        p->top_p = 0.95f;
+        p->max_new_frames = 300;
+        p->repetition_penalty = 1.2f;
+        p->max_chars = 384;
+        p->denoise_ref = true;
+        p->use_ref_codes = true;
+        p->apply_watermark = true;
+    }
+}
+
 static int vieneu_synthesize_impl(struct vieneu_context * vieneu, const struct vieneu_tts_params * params, struct vieneu_audio * out) {
     if (!vieneu || !params || !params->text || !out) {
         set_last_error("Invalid synthesize arguments: context, params, text, and out are required.");
@@ -517,6 +536,60 @@ static int vieneu_synthesize_v2_impl(struct vieneu_context * vieneu, const struc
     return 0;
 }
 
+
+static int vieneu_synthesize_v3_impl(struct vieneu_context * vieneu, const struct vieneu_tts_params_v3 * params, struct vieneu_audio * out) {
+    if (!vieneu || !params || !params->text || !out) {
+        set_last_error("Invalid synthesize_v3 arguments: context, params, text, and out are required.");
+        return -1;
+    }
+    if (vieneu->profile != VieneuProfileType::VIENEU_V3_NATIVE) {
+        set_last_error("vieneu_synthesize_v3 is only supported for the vieneu-v3-native profile.");
+        return -1;
+    }
+    if (!vieneu->vieneu_v3_native) {
+        set_last_error("Native engine not initialized.");
+        return -1;
+    }
+
+    VieneuV3NativeParams v3_params;
+    v3_params.text = params->text ? params->text : "";
+    v3_params.voice_id = params->voice_id ? params->voice_id : "";
+    v3_params.ref_audio_path = params->ref_audio_path ? params->ref_audio_path : "";
+    v3_params.style = params->style ? params->style : "tu_nhien";
+    v3_params.temperature = params->temperature;
+    v3_params.top_k = params->top_k;
+    v3_params.top_p = params->top_p;
+    v3_params.max_new_frames = params->max_new_frames;
+    v3_params.repetition_penalty = params->repetition_penalty;
+    v3_params.max_chars = params->max_chars;
+    v3_params.denoise_ref = params->denoise_ref;
+    v3_params.use_ref_codes = params->use_ref_codes;
+    v3_params.apply_watermark = params->apply_watermark;
+    v3_params.progress = make_progress_bridge(vieneu->progress_callback, vieneu->progress_user_data);
+
+    std::vector<float> out_audio;
+    std::string error;
+    if (!vieneu->vieneu_v3_native->synthesize(v3_params, out_audio, error)) {
+        set_last_error(error);
+        return -1;
+    }
+    if (out_audio.empty()) {
+        set_last_error("VieNeu v3 native synthesis produced empty audio.");
+        return -1;
+    }
+    normalize_output_level(out_audio);
+    out->samples = (float*)malloc(out_audio.size() * sizeof(float));
+    if (!out->samples) {
+        set_last_error("Memory allocation failed for audio output buffer.");
+        return -1;
+    }
+    std::copy(out_audio.begin(), out_audio.end(), out->samples);
+    out->n_samples = (int)out_audio.size();
+    out->sample_rate = vieneu->vieneu_v3_native->sample_rate();
+    out->channels = 1;
+    return 0;
+}
+
 static void clear_audio_output(struct vieneu_audio * out) {
     if (!out) {
         return;
@@ -558,6 +631,20 @@ VIENEU_API int vieneu_synthesize_v2(struct vieneu_context * vieneu, const struct
     } catch (...) {
         clear_audio_output(out);
         set_last_error("Unhandled unknown C++ exception during ABI v2 synthesis.");
+        return -1;
+    }
+}
+
+VIENEU_API int vieneu_synthesize_v3(struct vieneu_context * vieneu, const struct vieneu_tts_params_v3 * params, struct vieneu_audio * out) {
+    try {
+        return vieneu_synthesize_v3_impl(vieneu, params, out);
+    } catch (const std::exception& e) {
+        clear_audio_output(out);
+        set_last_error(std::string("Unhandled C++ exception during ABI v3 synthesis: ") + e.what());
+        return -1;
+    } catch (...) {
+        clear_audio_output(out);
+        set_last_error("Unhandled unknown C++ exception during ABI v3 synthesis.");
         return -1;
     }
 }

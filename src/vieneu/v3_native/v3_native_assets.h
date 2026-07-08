@@ -43,6 +43,8 @@ public:
     const std::vector<float>& audio_emb_t() const { return audio_emb_t_; }
     const V3AcousticWeights& acoustic_weights() const { return acoustic_weights_; }
     const std::string& voices_json() const { return voices_json_; }
+    bool has_speaker_projection() const { return !xvec_w_.empty(); }
+    bool compute_speaker_anchor(const std::vector<float>& speaker_emb, std::vector<float>& anchor, std::string& error) const;
 
     int text_vocab_size() const { return config_.text_vocab_size; }
     int hidden_size() const { return config_.hidden_size; }
@@ -55,14 +57,18 @@ private:
 
     V3NativeConfig config_;
     std::vector<float> text_emb_;
-    std::vector<float> audio_emb_; // Packed as [16 * 1024 * 768] (channels, vocab, hidden)
-    std::vector<float> text_emb_t_; // Packed as [hidden, text_vocab]
-    std::vector<float> audio_emb_t_; // Packed as [n_vq, hidden, audio_vocab]
+    std::vector<float> audio_emb_; // [n_vq, audio_vocab, hidden]
+    std::vector<float> text_emb_t_; // [hidden, text_vocab]
+    std::vector<float> audio_emb_t_; // [n_vq, hidden, audio_vocab]
+    std::vector<float> xvec_w_; // [hidden, speaker_dim]
+    std::vector<float> xvec_b_; // [hidden]
+    std::vector<float> xvec_ln_w_; // [hidden]
+    std::vector<float> xvec_ln_b_; // [hidden]
+    float xvec_ln_eps_ = 1.0e-5f;
     V3AcousticWeights acoustic_weights_;
     std::string voices_json_;
 };
 
-// Utilities for reading NPZ files
 std::unordered_map<std::string, V3NamedArray> load_v3_npz(const std::string& path, std::string& error);
 
 #endif // V3_NATIVE_ASSETS_H

@@ -8,6 +8,7 @@ Example:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,17 +20,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "third_party" / "llama.cpp
 from gguf import GGUFWriter
 
 
-def export_backbone_gguf(safetensors_path: Path, output_path: Path):
+def export_backbone_gguf(safetensors_path: Path, config_path: Path, output_path: Path):
     sd = {k: v.float() for k, v in safetensors.torch.load_file(str(safetensors_path)).items()}
 
     print("Mapping semantic backbone tensors to GGUF...")
     
-    # Qwen2/Qwen3 metadata
-    hidden_size = 768
-    num_layers = 12
-    num_heads = 12
-    num_kv_heads = 4
-    intermediate_size = 3072
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    hidden_size = int(cfg.get("hidden_size", 768))
+    num_layers = int(cfg.get("num_hidden_layers", 12))
+    num_heads = int(cfg.get("num_attention_heads", 12))
+    num_kv_heads = int(cfg.get("num_key_value_heads", 4))
+    intermediate_size = int(cfg.get("intermediate_size", 3072))
+    rope_theta = float(cfg.get("rope_theta", 1000000.0))
     text_vocab_size = sd["text_embeddings.weight"].shape[0]
 
     writer = GGUFWriter(str(output_path), "qwen3")
@@ -41,7 +43,7 @@ def export_backbone_gguf(safetensors_path: Path, output_path: Path):
     writer.add_head_count(num_heads)
     writer.add_head_count_kv(num_kv_heads)
     writer.add_layer_norm_rms_eps(1e-6)
-    writer.add_rope_freq_base(10000.0)
+    writer.add_rope_freq_base(rope_theta)
 
     # Add a dummy vocabulary to satisfy llama.cpp loader
     dummy_tokens = [f"<t_{i}>" for i in range(text_vocab_size)]
@@ -109,21 +111,33 @@ def export_heads_npz(safetensors_path: Path, output_path: Path):
     audio_emb = np.stack(audio_embeddings, axis=0)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(output_path, text_emb=text_emb, audio_emb=audio_emb)
+    payload = {"text_emb": text_emb, "audio_emb": audio_emb}
+    if "xvec_proj.0.weight" in sd:
+        payload["xvec_w"] = sd["xvec_proj.0.weight"].cpu().numpy()
+        payload["xvec_b"] = sd["xvec_proj.0.bias"].cpu().numpy()
+        payload["xvec_ln_w"] = sd["xvec_proj.1.weight"].cpu().numpy()
+        payload["xvec_ln_b"] = sd["xvec_proj.1.bias"].cpu().numpy()
+        payload["xvec_ln_eps"] = np.asarray([1.0e-5], dtype=np.float32)
+    np.savez(output_path, **payload)
     print(f"Heads NPZ exported to {output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export VieNeu v3 Turbo Native Assets")
     parser.add_argument("--model-dir", default=".models/vieneu-v3-turbo", help="Output model directory")
-    parser.add_argument("--safetensors", required=True, help="Path to input model.safetensors")
+    parser.add_argument("--safetensors", required=True, help="Path to input update/model.safetensors")
+    parser.add_argument("--config", required=True, help="Path to update/config.json")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
     safetensors_path = Path(args.safetensors)
+    config_path = Path(args.config)
 
     if not safetensors_path.exists():
         print(f"Error: {safetensors_path} does not exist.")
+        return 1
+    if not config_path.exists():
+        print(f"Error: {config_path} does not exist.")
         return 1
 
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +145,7 @@ def main():
     backbone_path = model_dir / "backbone.gguf"
     heads_path = model_dir / "vieneu_v3_heads.npz"
 
-    export_backbone_gguf(safetensors_path, backbone_path)
+    export_backbone_gguf(safetensors_path, config_path, backbone_path)
     export_heads_npz(safetensors_path, heads_path)
     return 0
 

@@ -276,13 +276,11 @@ static std::vector<float> transpose_audio_emb_local(const std::vector<float>& sr
 bool V3NativeAssets::load(const std::string& model_dir, std::string& error) {
     if (!load_config(join_paths(model_dir, "config.json"), error)) return false;
     if (!load_heads(join_paths(model_dir, "vieneu_v3_heads.npz"), error)) return false;
-    
-    // Check if acoustic folder exists inside model_dir
-    std::string acoustic_path = join_paths(join_paths(model_dir, "acoustic"), "vieneu_acoustic_weights.npz");
-    if (!load_acoustic(acoustic_path, error)) return false;
-    
-    if (!load_voices(join_paths(model_dir, "voices_v3_turbo.json"), error)) return false;
 
+    const std::string acoustic_path = join_paths(join_paths(model_dir, "acoustic"), "vieneu_acoustic_weights.npz");
+    if (!load_acoustic(acoustic_path, error)) return false;
+
+    if (!load_voices(join_paths(model_dir, "voices_v3_turbo.json"), error)) return false;
     return true;
 }
 
@@ -293,6 +291,12 @@ bool V3NativeAssets::load_config(const std::string& path, std::string& error) {
         config_.n_vq = c.value("n_vq", config_.n_vq);
         config_.hidden_size = c.value("hidden_size", config_.hidden_size);
         config_.num_hidden_layers = c.value("num_hidden_layers", config_.num_hidden_layers);
+        config_.num_attention_heads = c.value("num_attention_heads", config_.num_attention_heads);
+        config_.num_key_value_heads = c.value("num_key_value_heads", config_.num_key_value_heads);
+        config_.head_dim = c.value("head_dim", config_.head_dim);
+        config_.intermediate_size = c.value("intermediate_size", config_.intermediate_size);
+        config_.rope_theta = c.value("rope_theta", config_.rope_theta);
+        config_.rms_norm_eps = c.value("rms_norm_eps", config_.rms_norm_eps);
         config_.audio_pad_token_id = c.value("audio_pad_token_id", config_.audio_pad_token_id);
         config_.text_prompt_start_token_id = c.value("text_prompt_start_token_id", config_.text_prompt_start_token_id);
         config_.text_prompt_end_token_id = c.value("text_prompt_end_token_id", config_.text_prompt_end_token_id);
@@ -304,12 +308,21 @@ bool V3NativeAssets::load_config(const std::string& path, std::string& error) {
         config_.emotion_2_token_id = c.value("emotion_2_token_id", config_.emotion_2_token_id);
         config_.emotion_3_token_id = c.value("emotion_3_token_id", config_.emotion_3_token_id);
         config_.emotion_4_token_id = c.value("emotion_4_token_id", config_.emotion_4_token_id);
+        config_.default_style_token_id = c.value("default_style_token_id", config_.default_style_token_id);
         config_.text_vocab_size = c.value("text_vocab_size", config_.text_vocab_size);
         config_.audio_vocab_size = c.value("audio_vocab_size", config_.audio_vocab_size);
         config_.local_num_attention_heads = c.value("local_num_attention_heads", config_.local_num_attention_heads);
         config_.local_num_hidden_layers = c.value("local_num_hidden_layers", config_.local_num_hidden_layers);
         config_.local_intermediate_size = c.value("local_intermediate_size", config_.local_intermediate_size);
-        config_.rms_norm_eps = c.value("rms_norm_eps", config_.rms_norm_eps);
+        config_.use_speaker_embedding = c.value("use_speaker_embedding", config_.use_speaker_embedding);
+        config_.speaker_embedding_dim = c.value("speaker_embedding_dim", config_.speaker_embedding_dim);
+        config_.speaker_encoder_filename = c.value("speaker_encoder_filename", config_.speaker_encoder_filename);
+        if (c.contains("style_labels") && c.at("style_labels").is_object()) {
+            config_.style_labels.clear();
+            for (auto it = c.at("style_labels").begin(); it != c.at("style_labels").end(); ++it) {
+                config_.style_labels[it.key()] = it.value().get<int>();
+            }
+        }
         return true;
     } catch (const std::exception& e) {
         error = std::string("Failed to load native config: ") + e.what();
@@ -320,38 +333,57 @@ bool V3NativeAssets::load_config(const std::string& path, std::string& error) {
 bool V3NativeAssets::load_heads(const std::string& path, std::string& error) {
     try {
         auto arrays = load_v3_npz(path, error);
-        if (!error.empty()) {
-            return false;
-        }
-        auto text_it = arrays.find("text_emb.npy");
-        auto audio_it = arrays.find("audio_emb.npy");
-        if (text_it == arrays.end()) text_it = arrays.find("text_emb");
-        if (audio_it == arrays.end()) audio_it = arrays.find("audio_emb");
-
-        if (text_it == arrays.end() || audio_it == arrays.end()) {
+        if (!error.empty()) return false;
+        auto find_arr = [&](const std::string& name) -> V3NamedArray* {
+            auto it = arrays.find(name + ".npy");
+            if (it == arrays.end()) it = arrays.find(name);
+            return it == arrays.end() ? nullptr : &it->second;
+        };
+        auto text = find_arr("text_emb");
+        auto audio = find_arr("audio_emb");
+        if (!text || !audio) {
             error = "vieneu_v3_heads.npz is missing text_emb or audio_emb";
             return false;
         }
-
-        const auto& text = text_it->second;
-        const auto& audio = audio_it->second;
-        if (text.shape.size() != 2 || audio.shape.size() != 3) {
+        if (text->shape.size() != 2 || audio->shape.size() != 3) {
             error = "Unexpected embedding rank in vieneu_v3_heads.npz";
             return false;
         }
-        if (text.shape[0] != config_.text_vocab_size ||
-            text.shape[1] != config_.hidden_size ||
-            audio.shape[0] != config_.n_vq ||
-            audio.shape[1] != config_.audio_vocab_size ||
-            audio.shape[2] != config_.hidden_size) {
+        if (text->shape[0] != config_.text_vocab_size ||
+            text->shape[1] != config_.hidden_size ||
+            audio->shape[0] != config_.n_vq ||
+            audio->shape[1] != config_.audio_vocab_size ||
+            audio->shape[2] != config_.hidden_size) {
             error = "Embedding shapes in vieneu_v3_heads.npz do not match config.json";
             return false;
         }
-
-        text_emb_ = text.data;
-        audio_emb_ = audio.data;
+        text_emb_ = text->data;
+        audio_emb_ = audio->data;
         text_emb_t_ = transpose_2d_local(text_emb_, config_.text_vocab_size, config_.hidden_size);
         audio_emb_t_ = transpose_audio_emb_local(audio_emb_, config_.n_vq, config_.audio_vocab_size, config_.hidden_size);
+
+        xvec_w_.clear();
+        xvec_b_.clear();
+        xvec_ln_w_.clear();
+        xvec_ln_b_.clear();
+        xvec_ln_eps_ = 1.0e-5f;
+        if (auto arr = find_arr("xvec_w")) xvec_w_ = arr->data;
+        if (auto arr = find_arr("xvec_b")) xvec_b_ = arr->data;
+        if (auto arr = find_arr("xvec_ln_w")) xvec_ln_w_ = arr->data;
+        if (auto arr = find_arr("xvec_ln_b")) xvec_ln_b_ = arr->data;
+        if (auto arr = find_arr("xvec_ln_eps")) {
+            if (!arr->data.empty()) xvec_ln_eps_ = arr->data[0];
+        }
+        if (config_.use_speaker_embedding) {
+            const size_t expected_w = static_cast<size_t>(config_.hidden_size * config_.speaker_embedding_dim);
+            if (xvec_w_.size() != expected_w ||
+                xvec_b_.size() != static_cast<size_t>(config_.hidden_size) ||
+                xvec_ln_w_.size() != static_cast<size_t>(config_.hidden_size) ||
+                xvec_ln_b_.size() != static_cast<size_t>(config_.hidden_size)) {
+                error = "vieneu_v3_heads.npz is missing valid xvec projection tensors for the update model.";
+                return false;
+            }
+        }
         return true;
     } catch (const std::exception& e) {
         error = std::string("Failed to load vieneu_v3_heads.npz: ") + e.what();
@@ -359,13 +391,47 @@ bool V3NativeAssets::load_heads(const std::string& path, std::string& error) {
     }
 }
 
+bool V3NativeAssets::compute_speaker_anchor(const std::vector<float>& speaker_emb, std::vector<float>& anchor, std::string& error) const {
+    anchor.clear();
+    if (!config_.use_speaker_embedding) return true;
+    if (speaker_emb.size() != static_cast<size_t>(config_.speaker_embedding_dim)) {
+        error = "speaker_emb dimension does not match config.json.";
+        return false;
+    }
+    if (!has_speaker_projection()) {
+        error = "Speaker projection weights are not loaded.";
+        return false;
+    }
+    const int H = config_.hidden_size;
+    const int D = config_.speaker_embedding_dim;
+    anchor.assign(static_cast<size_t>(H), 0.0f);
+    for (int h = 0; h < H; ++h) {
+        double v = xvec_b_[static_cast<size_t>(h)];
+        const float* row = xvec_w_.data() + static_cast<size_t>(h * D);
+        for (int d = 0; d < D; ++d) v += static_cast<double>(row[d]) * speaker_emb[static_cast<size_t>(d)];
+        anchor[static_cast<size_t>(h)] = static_cast<float>(v);
+    }
+    double mean = 0.0;
+    for (float v : anchor) mean += v;
+    mean /= static_cast<double>(H);
+    double var = 0.0;
+    for (float v : anchor) {
+        const double diff = static_cast<double>(v) - mean;
+        var += diff * diff;
+    }
+    var /= static_cast<double>(H);
+    const double inv = 1.0 / std::sqrt(var + static_cast<double>(xvec_ln_eps_));
+    for (int h = 0; h < H; ++h) {
+        const double norm = (static_cast<double>(anchor[static_cast<size_t>(h)]) - mean) * inv;
+        anchor[static_cast<size_t>(h)] = static_cast<float>(norm * xvec_ln_w_[static_cast<size_t>(h)] + xvec_ln_b_[static_cast<size_t>(h)]);
+    }
+    return true;
+}
+
 bool V3NativeAssets::load_acoustic(const std::string& path, std::string& error) {
     try {
         auto arrays = load_v3_npz(path, error);
-        if (!error.empty()) {
-            return false;
-        }
-
+        if (!error.empty()) return false;
         auto take = [&](const std::string& name, std::vector<float>& dst) -> bool {
             auto it = arrays.find(name + ".npy");
             if (it == arrays.end()) it = arrays.find(name);
@@ -376,15 +442,12 @@ bool V3NativeAssets::load_acoustic(const std::string& path, std::string& error) 
             dst = it->second.data;
             return true;
         };
-
         if (!take("slot_pos_emb", acoustic_weights_.slot_pos_emb)) return false;
         if (!take("norm", acoustic_weights_.final_norm)) return false;
-
-        const int num_layers = config_.local_num_hidden_layers;
-        acoustic_weights_.layers.resize(num_layers);
-        for (int i = 0; i < num_layers; ++i) {
+        acoustic_weights_.layers.resize(static_cast<size_t>(config_.local_num_hidden_layers));
+        for (int i = 0; i < config_.local_num_hidden_layers; ++i) {
             std::string prefix = "layers." + std::to_string(i) + ".";
-            V3AcousticLayerWeights& l = acoustic_weights_.layers[i];
+            V3AcousticLayerWeights& l = acoustic_weights_.layers[static_cast<size_t>(i)];
             if (!take(prefix + "norm1", l.norm1)) return false;
             if (!take(prefix + "attn.qkv", l.qkv)) return false;
             if (!take(prefix + "attn.q_norm", l.q_norm)) return false;
@@ -395,7 +458,6 @@ bool V3NativeAssets::load_acoustic(const std::string& path, std::string& error) 
             if (!take(prefix + "ff_gate", l.ff_gate)) return false;
             if (!take(prefix + "ff_down", l.ff_down)) return false;
         }
-
         acoustic_weights_.loaded = true;
         return true;
     } catch (const std::exception& e) {

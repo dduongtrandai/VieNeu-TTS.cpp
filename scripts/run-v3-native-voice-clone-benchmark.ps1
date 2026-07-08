@@ -4,6 +4,7 @@ param(
     [ValidateSet("all", "example", "example_2", "example_3", "example_4")]
     [string]$Ref = "all",
     [string]$OutputDir = "outputs\voice-clone",
+    [string]$Style = "tu_nhien",
     [string]$LogDir = "outputs\voice-clone\logs",
     [int]$MaxNewFrames = 180,
     [float]$Temperature = 0.8,
@@ -23,7 +24,9 @@ param(
     [switch]$UseGgmlLinear,
     [switch]$DisableGgmlHeads,
     [switch]$NoFuseFfn,
-    [switch]$DisableQ8Ffn
+    [switch]$DisableQ8Ffn,
+    [switch]$NoDenoiseRef,
+    [switch]$NoRefCodes
 )
 
 Set-StrictMode -Version Latest
@@ -186,6 +189,7 @@ function Assert-NativeAssets([string]$ResolvedModelDir, [string]$ResolvedCodecDi
     $required = @(
         (Join-Path $ResolvedModelDir "config.json"),
         (Join-Path $ResolvedModelDir "tokenizer.json"),
+        (Join-Path $ResolvedModelDir "speaker_encoder.onnx"),
         (Join-Path $ResolvedModelDir "voices_v3_turbo.json"),
         (Join-Path $ResolvedModelDir "backbone.gguf"),
         (Join-Path $ResolvedModelDir "vieneu_v3_heads.npz"),
@@ -302,10 +306,17 @@ try {
                 "--top-p", $TopP.ToString($inv),
                 "--max-new-frames", $MaxNewFrames.ToString($inv),
                 "--max-chars", $MaxChars.ToString($inv),
-                "--threads", $Threads.ToString($inv)
+                "--threads", $Threads.ToString($inv),
+                "--style", $Style
             )
             if (![string]::IsNullOrWhiteSpace($ResolvedOnnxDir)) {
                 $argsList += @("--onnx-dir", $ResolvedOnnxDir)
+            }
+            if ($NoDenoiseRef) {
+                $argsList += "--no-denoise-ref"
+            }
+            if ($NoRefCodes) {
+                $argsList += "--no-ref-codes"
             }
 
             Write-Step "Cloning from $($item.audio)"
@@ -370,3 +381,5 @@ try {
 } finally {
     Pop-Location
 }
+
+

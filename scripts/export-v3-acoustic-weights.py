@@ -40,6 +40,7 @@ def main() -> int:
     parser.add_argument("--checkpoint", default="pnnbao-ump/VieNeu-TTS-v3-Turbo", help="HF repo id or local checkpoint directory.")
     parser.add_argument("--output", default=r".models\vieneu-v3-turbo\acoustic\vieneu_acoustic_weights.npz", help="Output NPZ path.")
     parser.add_argument("--hf-token", default=None, help="Optional Hugging Face token.")
+    parser.add_argument("--subfolder", default="update", help="Checkpoint subfolder to load.")
     args = parser.parse_args()
 
     source_repo = Path(args.source_repo).resolve()
@@ -51,21 +52,12 @@ def main() -> int:
     from vieneu._v3_turbo_engine.configuration_v3_turbo import VieNeuV3TurboConfig
     from vieneu._v3_turbo_engine.hub_load_v3_turbo import load_v3_turbo_checkpoint
 
-    cfg = VieNeuV3TurboConfig.from_pretrained(args.checkpoint, token=args.hf_token)
-    model = load_v3_turbo_checkpoint(args.checkpoint, token=args.hf_token, device="cpu", dtype="float32").eval()
+    cfg = VieNeuV3TurboConfig.from_pretrained(args.checkpoint, token=args.hf_token, subfolder=args.subfolder or "")
+    model = load_v3_turbo_checkpoint(args.checkpoint, token=args.hf_token, device="cpu", dtype="float32", subfolder=args.subfolder or None).eval()
     dec = model.acoustic_decoder
 
-    expected = {
-        "hidden_size": 768,
-        "n_vq": 16,
-        "local_num_hidden_layers": 2,
-        "local_intermediate_size": 2048,
-        "local_num_attention_heads": 8,
-    }
-    actual = {key: int(getattr(cfg, key)) for key in expected}
-    mismatches = {key: (expected[key], actual[key]) for key in expected if expected[key] != actual[key]}
-    if mismatches:
-        raise SystemExit(f"Unexpected v3 acoustic config: {json.dumps(mismatches)}")
+    if int(getattr(cfg, "hidden_size")) <= 0 or int(getattr(cfg, "n_vq")) <= 0:
+        raise SystemExit("Invalid v3 acoustic config loaded from checkpoint.")
 
     arrays: dict[str, np.ndarray] = {
         "slot_pos_emb": _array(dec.slot_pos_emb.weight),

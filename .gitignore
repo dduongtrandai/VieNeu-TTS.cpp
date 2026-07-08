@@ -10,7 +10,20 @@ outputs/
 .models/
 ort_sdk/
 /llama.cpp/
+.deps/
+ninja.exe
 onnxruntime-win-*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Rust build target
+target/
 
 # Visual Studio files
 .vs/

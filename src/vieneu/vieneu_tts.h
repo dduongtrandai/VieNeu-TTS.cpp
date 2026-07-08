@@ -93,6 +93,23 @@ struct vieneu_tts_params_v2 {
     bool         apply_watermark;
 };
 
+struct vieneu_tts_params_v3 {
+    int          abi_version;
+    const char * text;
+    const char * voice_id;
+    const char * ref_audio_path;
+    const char * style;
+    float        temperature;
+    int          top_k;
+    float        top_p;
+    int          max_new_frames;
+    float        repetition_penalty;
+    int          max_chars;
+    bool         denoise_ref;
+    bool         use_ref_codes;
+    bool         apply_watermark;
+};
+
 VIENEU_API const char * vieneu_version(void);
 VIENEU_API const char * vieneu_last_error(void);
 
@@ -110,6 +127,8 @@ VIENEU_API void vieneu_init_v2_default_params(struct vieneu_init_params_v2 * p);
 VIENEU_API struct vieneu_context * vieneu_init_v2(const struct vieneu_init_params_v2 * params);
 VIENEU_API void vieneu_tts_v2_default_params(struct vieneu_tts_params_v2 * p);
 VIENEU_API int vieneu_synthesize_v2(struct vieneu_context * vieneu, const struct vieneu_tts_params_v2 * params, struct vieneu_audio * out);
+VIENEU_API void vieneu_tts_v3_default_params(struct vieneu_tts_params_v3 * p);
+VIENEU_API int vieneu_synthesize_v3(struct vieneu_context * vieneu, const struct vieneu_tts_params_v3 * params, struct vieneu_audio * out);
 
 VIENEU_API int vieneu_encode_reference(struct vieneu_context * vieneu, const char * ref_audio_path, float * out_embedding_128);
 VIENEU_API int vieneu_list_preset_voices(struct vieneu_context * vieneu, char * out_json, int max_len);

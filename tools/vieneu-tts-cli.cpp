@@ -21,7 +21,7 @@
 static void print_usage(const std::string& argv0) {
     std::cout << "Usage: " << argv0 << " [options]\n\n"
               << "Options:\n"
-              << "  --profile NAME         Runtime profile: vieneu-v2-turbo or vieneu-v3-onnx (default: vieneu-v2-turbo)\n"
+              << "  --profile NAME         Runtime profile: vieneu-v2-turbo, vieneu-v3-onnx, or vieneu-v3-native (default: vieneu-v2-turbo)\n"
               << "  -m, --model PATH       Path to GGUF model (required for v2)\n"
               << "  -d, --decoder PATH     Path to ONNX decoder (required for v2)\n"
               << "  -e, --encoder PATH     Path to ONNX encoder (optional for v2)\n"
@@ -31,6 +31,9 @@ static void print_usage(const std::string& argv0) {
               << "  --config PATH          VieNeu v3 config.json path (optional)\n"
               << "  --tokenizer PATH       VieNeu v3 tokenizer.json path (optional)\n"
               << "  --ref-audio PATH       VieNeu v3 reference WAV for voice cloning\n"
+              << "  --style NAME          VieNeu v3 native style: tu_nhien, tin_tuc, doc_truyen\n"
+              << "  --no-denoise-ref      Disable v3 native reference denoise preprocessing\n"
+              << "  --no-ref-codes        Use speaker anchor only; do not include MOSS ref codes\n"
               << "  -t, --text TEXT        Text to synthesize (default: 'Xin chào các bạn.')\n"
               << "  -v, --voice ID         Preset voice ID (default: none)\n"
               << "  -o, --output PATH      Path to output WAV file (default: 'output.wav')\n"
@@ -139,6 +142,9 @@ int main(int argc, char* argv[]) {
     std::string voice_id = "";
     std::string output_path = "output.wav";
     std::string voices_json_path = "";
+    std::string style = "tu_nhien";
+    bool denoise_ref = true;
+    bool use_ref_codes = true;
     float temperature = 0.0f;
     int top_k = 0;
     float top_p = 0.0f;
@@ -168,6 +174,12 @@ int main(int argc, char* argv[]) {
             if (i + 1 < args.size()) tokenizer_path = args[++i];
         } else if (arg == "--ref-audio") {
             if (i + 1 < args.size()) ref_audio_path = args[++i];
+        } else if (arg == "--style") {
+            if (i + 1 < args.size()) style = args[++i];
+        } else if (arg == "--no-denoise-ref") {
+            denoise_ref = false;
+        } else if (arg == "--no-ref-codes") {
+            use_ref_codes = false;
         } else if (arg == "-t" || arg == "--text") {
             if (i + 1 < args.size()) text = args[++i];
         } else if (arg == "-v" || arg == "--voice") {
@@ -234,23 +246,40 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        vieneu_tts_params_v2 tts_params;
-        vieneu_tts_v2_default_params(&tts_params);
-        tts_params.text = text.c_str();
-        tts_params.voice_id = voice_id.empty() ? nullptr : voice_id.c_str();
-        tts_params.ref_audio_path = ref_audio_path.empty() ? nullptr : ref_audio_path.c_str();
-        if (temperature > 0.0f) tts_params.temperature = temperature;
-        if (top_k > 0) tts_params.top_k = top_k;
-        if (top_p > 0.0f) tts_params.top_p = top_p;
-        if (max_new_frames > 0) tts_params.max_new_frames = max_new_frames;
-        if (max_chars > 0) tts_params.max_chars = max_chars;
-
         vieneu_audio audio;
         memset(&audio, 0, sizeof(audio));
         std::cout << "[CLI] Synthesizing with VieNeu v3: \"" << text << "\"\n";
-        
+
         auto start_time = std::chrono::high_resolution_clock::now();
-        int synth_status = vieneu_synthesize_v2(ctx, &tts_params, &audio);
+        int synth_status = 0;
+        if (profile == "vieneu-v3-native") {
+            vieneu_tts_params_v3 tts_params;
+            vieneu_tts_v3_default_params(&tts_params);
+            tts_params.text = text.c_str();
+            tts_params.voice_id = voice_id.empty() ? nullptr : voice_id.c_str();
+            tts_params.ref_audio_path = ref_audio_path.empty() ? nullptr : ref_audio_path.c_str();
+            tts_params.style = style.c_str();
+            if (temperature > 0.0f) tts_params.temperature = temperature;
+            if (top_k > 0) tts_params.top_k = top_k;
+            if (top_p > 0.0f) tts_params.top_p = top_p;
+            if (max_new_frames > 0) tts_params.max_new_frames = max_new_frames;
+            if (max_chars > 0) tts_params.max_chars = max_chars;
+            tts_params.denoise_ref = denoise_ref;
+            tts_params.use_ref_codes = use_ref_codes;
+            synth_status = vieneu_synthesize_v3(ctx, &tts_params, &audio);
+        } else {
+            vieneu_tts_params_v2 tts_params;
+            vieneu_tts_v2_default_params(&tts_params);
+            tts_params.text = text.c_str();
+            tts_params.voice_id = voice_id.empty() ? nullptr : voice_id.c_str();
+            tts_params.ref_audio_path = ref_audio_path.empty() ? nullptr : ref_audio_path.c_str();
+            if (temperature > 0.0f) tts_params.temperature = temperature;
+            if (top_k > 0) tts_params.top_k = top_k;
+            if (top_p > 0.0f) tts_params.top_p = top_p;
+            if (max_new_frames > 0) tts_params.max_new_frames = max_new_frames;
+            if (max_chars > 0) tts_params.max_chars = max_chars;
+            synth_status = vieneu_synthesize_v2(ctx, &tts_params, &audio);
+        }
         auto end_time = std::chrono::high_resolution_clock::now();
         
         if (synth_status != 0) {

@@ -2,6 +2,7 @@
 #define V3_NATIVE_CONFIG_H
 
 #include <string>
+#include <unordered_map>
 
 struct V3NativeConfig {
     int n_vq = 16;
@@ -25,12 +26,22 @@ struct V3NativeConfig {
     int emotion_2_token_id = 10;
     int emotion_3_token_id = 11;
     int emotion_4_token_id = 12;
-    int text_vocab_size = 389; // text_vocab_size can be dynamically populated from config.json
+    int default_style_token_id = 16;
+    std::unordered_map<std::string, int> style_labels = {
+        {"tu_nhien", 16},
+        {"tin_tuc", 17},
+        {"doc_truyen", 18},
+    };
+    int text_vocab_size = 389;
     int audio_vocab_size = 1024;
 
     int local_num_attention_heads = 8;
     int local_num_hidden_layers = 2;
     int local_intermediate_size = 2048;
+
+    bool use_speaker_embedding = false;
+    int speaker_embedding_dim = 192;
+    std::string speaker_encoder_filename = "speaker_encoder.onnx";
 };
 
 #endif // V3_NATIVE_CONFIG_H

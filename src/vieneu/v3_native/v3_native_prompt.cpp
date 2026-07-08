@@ -222,7 +222,7 @@ V3NativePrompt::V3NativePrompt(const V3NativeConfig& config, const V3NativeToken
 V3PromptRows V3NativePrompt::build_rows(
     const std::string& phonemes,
     const std::vector<int64_t>* ref_codes,
-    int leading_token) const {
+    int style_token_id) const {
     const std::vector<int64_t> phone_ids = tokenizer_.encode(phonemes);
     const int64_t cols = config_.n_vq + 1;
     const int64_t text_rows = static_cast<int64_t>(phone_ids.size()) + 3;
@@ -233,7 +233,7 @@ V3PromptRows V3NativePrompt::build_rows(
     rows.cols = cols;
     rows.data.assign(static_cast<size_t>(rows.rows * rows.cols), config_.audio_pad_token_id);
     
-    rows.data[0] = leading_token;
+    rows.data[0] = style_token_id;
     rows.data[cols] = config_.text_prompt_start_token_id;
     for (size_t i = 0; i < phone_ids.size(); ++i) {
         rows.data[static_cast<size_t>((static_cast<int64_t>(i) + 2) * cols)] = phone_ids[i];
@@ -253,13 +253,13 @@ V3PromptRows V3NativePrompt::build_rows(
     return rows;
 }
 
-std::vector<float> V3NativePrompt::embed_rows(const V3PromptRows& rows) const {
+std::vector<float> V3NativePrompt::embed_rows(const V3PromptRows& rows, const std::vector<float>* speaker_anchor) const {
     std::vector<float> embeds(static_cast<size_t>(rows.rows * config_.hidden_size), 0.0f);
-    embed_rows_into(rows, embeds);
+    embed_rows_into(rows, speaker_anchor, embeds);
     return embeds;
 }
 
-void V3NativePrompt::embed_rows_into(const V3PromptRows& rows, std::vector<float>& embeds) const {
+void V3NativePrompt::embed_rows_into(const V3PromptRows& rows, const std::vector<float>* speaker_anchor, std::vector<float>& embeds) const {
     embeds.resize(static_cast<size_t>(rows.rows * config_.hidden_size));
     std::fill(embeds.begin(), embeds.end(), 0.0f);
     const auto& text_emb = assets_.text_emb();
@@ -283,16 +283,21 @@ void V3NativePrompt::embed_rows_into(const V3PromptRows& rows, std::vector<float
                 dst[h] += src[h];
             }
         }
+        if (speaker_anchor && speaker_anchor->size() == static_cast<size_t>(H)) {
+            for (int h = 0; h < H; ++h) {
+                dst[h] += (*speaker_anchor)[static_cast<size_t>(h)];
+            }
+        }
     }
 }
 
-std::vector<float> V3NativePrompt::embed_slot(const std::vector<int64_t>& codes) const {
+std::vector<float> V3NativePrompt::embed_slot(const std::vector<int64_t>& codes, const std::vector<float>* speaker_anchor) const {
     std::vector<float> embeds;
-    embed_slot_into(codes, embeds);
+    embed_slot_into(codes, speaker_anchor, embeds);
     return embeds;
 }
 
-void V3NativePrompt::embed_slot_into(const std::vector<int64_t>& codes, std::vector<float>& embeds) const {
+void V3NativePrompt::embed_slot_into(const std::vector<int64_t>& codes, const std::vector<float>* speaker_anchor, std::vector<float>& embeds) const {
     embeds.resize(static_cast<size_t>(config_.hidden_size));
     std::fill(embeds.begin(), embeds.end(), 0.0f);
     const auto& audio_emb = assets_.audio_emb();
@@ -305,6 +310,11 @@ void V3NativePrompt::embed_slot_into(const std::vector<int64_t>& codes, std::vec
         const float* src = audio_emb.data() + (static_cast<int64_t>(ch) * config_.audio_vocab_size + id) * H;
         for (int h = 0; h < H; ++h) {
             embeds[h] += src[h];
+        }
+    }
+    if (speaker_anchor && speaker_anchor->size() == static_cast<size_t>(H)) {
+        for (int h = 0; h < H; ++h) {
+            embeds[h] += (*speaker_anchor)[static_cast<size_t>(h)];
         }
     }
 }

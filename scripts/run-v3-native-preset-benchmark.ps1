@@ -3,6 +3,7 @@ param(
     [string]$TextFile = "scripts\v3-native-benchmark-text.txt",
     [string]$Voice = "",
     [string]$RefAudio = "",
+    [string]$Style = "tu_nhien",
     [string]$Output = "outputs\vieneu-v3-native-benchmark.wav",
     [string]$Log = "outputs\vieneu-v3-native-benchmark.log",
     [int]$MaxNewFrames = 300,
@@ -23,11 +24,16 @@ param(
     [switch]$UseGgmlLinear,
     [switch]$DisableGgmlHeads,
     [switch]$NoFuseFfn,
-    [switch]$DisableQ8Ffn
+    [switch]$DisableQ8Ffn,
+    [switch]$NoDenoiseRef,
+    [switch]$NoRefCodes,
+    [switch]$SkipDownload
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot "build"
@@ -180,22 +186,202 @@ function Copy-RuntimeDlls([string]$CliExe) {
     }
 }
 
-function Assert-NativeAssets([string]$ResolvedModelDir, [string]$ResolvedCodecDir) {
+function Test-AssetIntegrity([string]$Path) {
+    if ([System.IO.Path]::GetExtension($Path) -ne ".npz") {
+        return $true
+    }
+
+    try {
+        Add-Type -AssemblyName System.IO.Compression | Out-Null
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read)
+            try {
+                $buffer = [byte[]]::new(65536)
+                foreach ($entry in $zip.Entries) {
+                    $entryStream = $entry.Open()
+                    try {
+                        while ($entryStream.Read($buffer, 0, $buffer.Length) -gt 0) {
+                        }
+                    } finally {
+                        $entryStream.Dispose()
+                    }
+                }
+            } finally {
+                $zip.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+        return $true
+    } catch {
+        Write-Host "Integrity check failed for ${Path}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-RemoteFileSize([string]$Url) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (!$curl) {
+        return -1
+    }
+
+    $headers = & $curl.Source -L -I --silent --show-error $Url
+    if ($LASTEXITCODE -ne 0) {
+        return -1
+    }
+
+    $linked = $headers | Select-String -Pattern '^\s*x-linked-size:\s*(\d+)\s*$' | Select-Object -Last 1
+    if ($linked) {
+        return [int64]$linked.Matches[0].Groups[1].Value
+    }
+
+    $content = $headers | Select-String -Pattern '^\s*content-length:\s*(\d+)\s*$' | Select-Object -Last 1
+    if ($content) {
+        return [int64]$content.Matches[0].Groups[1].Value
+    }
+    return -1
+}
+
+function Download-File([string]$Url, [string]$Destination) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & $curl.Source -L --fail --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $Destination $Url
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+
+        Write-Host "Resume failed, retrying from scratch with curl..."
+        if (Test-Path $Destination) {
+            Remove-Item -LiteralPath $Destination -Force
+        }
+        & $curl.Source -L --fail --retry 5 --retry-delay 2 --connect-timeout 30 -o $Destination $Url
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        throw "curl failed to download $Url"
+    }
+
+    Invoke-WebRequest -Uri $Url -OutFile $Destination
+}
+
+function Ensure-OptionalFile([string]$Url, [string]$Destination) {
+    try {
+        Ensure-File $Url $Destination
+    } catch {
+        Write-Host "Optional asset unavailable: $Url" -ForegroundColor Yellow
+        Write-Host "  $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+}
+
+function Ensure-File([string]$Url, [string]$Destination) {
+    if (Test-Path $Destination) {
+        $localSize = (Get-Item -LiteralPath $Destination).Length
+        if ($localSize -gt 0) {
+            Write-Host "Found: $Destination"
+            return
+        }
+    }
+
+    if ($SkipDownload) {
+        throw "Missing required file and -SkipDownload was set: $Destination"
+    }
+
+    $parent = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+
+    $remoteSize = Get-RemoteFileSize $Url
+    if (Test-Path $Destination) {
+        $localSize = (Get-Item -LiteralPath $Destination).Length
+        if ($remoteSize -gt 0 -and $localSize -eq $remoteSize) {
+            if (!(Test-AssetIntegrity $Destination)) {
+                Write-Host "Local file has expected size but failed integrity check, redownloading: $Destination"
+                Remove-Item -LiteralPath $Destination -Force
+            } else {
+                Write-Host "Found: $Destination ($localSize bytes)"
+                return
+            }
+        }
+        if ((Test-Path $Destination) -and $remoteSize -gt 0 -and $localSize -gt $remoteSize) {
+            Write-Host "Local file is larger than remote metadata, redownloading: $Destination"
+            Remove-Item -LiteralPath $Destination -Force
+        } elseif (Test-Path $Destination) {
+            Write-Host "Resuming: $Destination ($localSize / $remoteSize bytes)"
+        }
+    } else {
+        Write-Host "Downloading: $Url"
+        Write-Host "        to: $Destination"
+    }
+
+    Download-File $Url $Destination
+
+    if ($remoteSize -gt 0) {
+        $finalSize = (Get-Item -LiteralPath $Destination).Length
+        if ($finalSize -ne $remoteSize) {
+            throw "Downloaded size mismatch for $Destination. Expected $remoteSize bytes, got $finalSize bytes."
+        }
+    }
+
+    if (!(Test-AssetIntegrity $Destination)) {
+        Write-Host "Redownloading from scratch after failed integrity check: $Destination"
+        Remove-Item -LiteralPath $Destination -Force
+        Download-File $Url $Destination
+        if ($remoteSize -gt 0) {
+            $finalSize = (Get-Item -LiteralPath $Destination).Length
+            if ($finalSize -ne $remoteSize) {
+                throw "Downloaded size mismatch for $Destination. Expected $remoteSize bytes, got $finalSize bytes."
+            }
+        }
+        if (!(Test-AssetIntegrity $Destination)) {
+            throw "Downloaded file failed integrity check: $Destination"
+        }
+    }
+}
+
+function Ensure-NativeAssets([string]$ResolvedModelDir, [string]$ResolvedCodecDir, [string]$ResolvedVoicesJson) {
     $required = @(
         (Join-Path $ResolvedModelDir "config.json"),
         (Join-Path $ResolvedModelDir "tokenizer.json"),
-        (Join-Path $ResolvedModelDir "voices_v3_turbo.json"),
+        (Join-Path $ResolvedModelDir "speaker_encoder.onnx"),
+        $ResolvedVoicesJson,
         (Join-Path $ResolvedModelDir "backbone.gguf"),
         (Join-Path $ResolvedModelDir "vieneu_v3_heads.npz"),
         (Join-Path $ResolvedModelDir "acoustic\vieneu_acoustic_weights.npz"),
         (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_decode_full.onnx"),
-        (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_encode.onnx")
+        (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_decode_shared.data"),
+        (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_encode.onnx"),
+        (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_encode.data")
     )
 
     $missing = @($required | Where-Object { !(Test-Path $_) })
-    if ($missing.Count -gt 0) {
-        throw "Missing native benchmark assets:`n$($missing -join "`n")`nExport native assets first, for example with scripts\export-v3-native-assets.py."
+    if ($missing.Count -eq 0) {
+        return
     }
+
+    if ($SkipDownload) {
+        throw "Missing native benchmark assets and -SkipDownload was set:`n$($missing -join "`n")"
+    }
+
+    Write-Step "Downloading missing native benchmark assets from Hugging Face..."
+    $hfCppBase = "https://huggingface.co/lastudio-community/VieNeu-TTS-v3-Turbo-CPP/resolve/main"
+    $hfTurboBase = "https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo/resolve/main"
+    $hfUpdateBase = "$hfTurboBase/update"
+
+    Ensure-File "$hfUpdateBase/config.json" (Join-Path $ResolvedModelDir "config.json")
+    Ensure-File "$hfUpdateBase/tokenizer.json" (Join-Path $ResolvedModelDir "tokenizer.json")
+    Ensure-File "$hfTurboBase/speaker_encoder.onnx" (Join-Path $ResolvedModelDir "speaker_encoder.onnx")
+    Ensure-File "$hfTurboBase/voices_v3_turbo.json" $ResolvedVoicesJson
+    Ensure-OptionalFile "$hfTurboBase/denoiser.onnx" (Join-Path $ResolvedModelDir "denoiser.onnx")
+    Ensure-OptionalFile "$hfUpdateBase/model.safetensors" (Join-Path $ResolvedModelDir "update\model.safetensors")
+
+    Ensure-File "$hfCppBase/backbone.gguf" (Join-Path $ResolvedModelDir "backbone.gguf")
+    Ensure-File "$hfCppBase/vieneu_v3_heads.npz" (Join-Path $ResolvedModelDir "vieneu_v3_heads.npz")
+    Ensure-File "$hfCppBase/acoustic/vieneu_acoustic_weights.npz" (Join-Path $ResolvedModelDir "acoustic\vieneu_acoustic_weights.npz")
+    
+    Ensure-File "$hfCppBase/codec/moss_audio_tokenizer_decode_full.onnx" (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_decode_full.onnx")
+    Ensure-File "$hfCppBase/codec/moss_audio_tokenizer_decode_shared.data" (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_decode_shared.data")
+    Ensure-File "$hfCppBase/codec/moss_audio_tokenizer_encode.onnx" (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_encode.onnx")
+    Ensure-File "$hfCppBase/codec/moss_audio_tokenizer_encode.data" (Join-Path $ResolvedCodecDir "moss_audio_tokenizer_encode.data")
 }
 
 function Quote-ProcessArg([string]$Value) {
@@ -239,7 +425,7 @@ try {
     Write-Step "Preparing native benchmark"
     Ensure-Built $CliExe
     Copy-RuntimeDlls $CliExe
-    Assert-NativeAssets $ResolvedModelDir $ResolvedCodecDir
+    Ensure-NativeAssets $ResolvedModelDir $ResolvedCodecDir $ResolvedVoicesJson
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath), (Split-Path -Parent $LogPath) | Out-Null
 
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
@@ -255,7 +441,8 @@ try {
         "--top-p", $TopP.ToString($inv),
         "--max-new-frames", $MaxNewFrames.ToString($inv),
         "--max-chars", $MaxChars.ToString($inv),
-        "--threads", $Threads.ToString($inv)
+        "--threads", $Threads.ToString($inv),
+        "--style", $Style
     )
 
     if (![string]::IsNullOrWhiteSpace($ResolvedOnnxDir)) {
@@ -266,6 +453,12 @@ try {
     }
     if ($RefAudio.Trim().Length -gt 0) {
         $argsList += @("--ref-audio", (Resolve-RepoPath $RefAudio))
+    }
+    if ($NoDenoiseRef) {
+        $argsList += "--no-denoise-ref"
+    }
+    if ($NoRefCodes) {
+        $argsList += "--no-ref-codes"
     }
 
     $oldBenchmark = $env:VIENEU_V3_NATIVE_BENCHMARK
@@ -340,3 +533,5 @@ try {
 } finally {
     Pop-Location
 }
+
+
